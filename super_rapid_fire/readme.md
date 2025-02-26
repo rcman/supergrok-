@@ -1,4 +1,4 @@
-# Notes
+# Super Grok Code for the game Super Rapid Fire
 
 <br>
 
