@@ -1,0 +1,160 @@
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_image.h>
+#include <vector>
+#include <cstdlib>
+#include <ctime>
+
+// Window dimensions and game constants
+const int WINDOW_WIDTH = 800;
+const int WINDOW_HEIGHT = 600;
+const int PLAYER_SPEED = 5;
+const int BULLET_SPEED = 10;
+const int ENEMY_SPEED = 2;
+
+// Player structure
+struct Player {
+    SDL_Rect rect = {WINDOW_WIDTH / 2 - 25, WINDOW_HEIGHT - 100, 50, 50}; // x, y, w, h
+    SDL_Texture* texture;
+};
+
+// Bullet structure
+struct Bullet {
+    SDL_Rect rect;
+    bool isPlayerBullet; // True for player bullets, false for enemy bullets (not used here)
+    SDL_Texture* texture;
+};
+
+// Enemy structure
+struct Enemy {
+    SDL_Rect rect;
+    SDL_Texture* texture;
+};
+
+// Function to render scrolling background
+void renderBackground(SDL_Renderer* renderer, SDL_Texture* bgTexture, int& bgY) {
+    bgY += 2; // Scroll speed
+    if (bgY >= WINDOW_HEIGHT) bgY = 0; // Reset when it scrolls off-screen
+    SDL_Rect bgRect1 = {0, bgY, WINDOW_WIDTH, WINDOW_HEIGHT};
+    SDL_Rect bgRect2 = {0, bgY - WINDOW_HEIGHT, WINDOW_WIDTH, WINDOW_HEIGHT};
+    SDL_RenderCopy(renderer, bgTexture, NULL, &bgRect1);
+    SDL_RenderCopy(renderer, bgTexture, NULL, &bgRect2);
+}
+
+int main() {
+    // Initialize SDL and SDL_image
+    SDL_Init(SDL_INIT_VIDEO);
+    IMG_Init(IMG_INIT_PNG);
+
+    // Create window and renderer
+    SDL_Window* window = SDL_CreateWindow("Space Shooter", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, WINDOW_WIDTH, WINDOW_HEIGHT, 0);
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+
+    // Load textures
+    SDL_Texture* bgTexture = IMG_LoadTexture(renderer, "background.png");
+    SDL_Texture* playerTexture = IMG_LoadTexture(renderer, "player.png");
+    SDL_Texture* enemyTexture = IMG_LoadTexture(renderer, "enemy.png");
+    SDL_Texture* bulletTexture = IMG_LoadTexture(renderer, "bullet.png");
+
+    // Check if textures loaded successfully
+    if (!bgTexture || !playerTexture || !enemyTexture || !bulletTexture) {
+        SDL_Log("Failed to load textures: %s", IMG_GetError());
+        return 1;
+    }
+
+    // Initialize game objects
+    Player player = {{WINDOW_WIDTH / 2 - 25, WINDOW_HEIGHT - 100, 50, 50}, playerTexture};
+    std::vector<Bullet> bullets;
+    std::vector<Enemy> enemies;
+    int bgY = 0; // Background scroll position
+    bool running = true;
+    Uint32 lastShot = 0; // Time of last shot for cooldown
+
+    // Seed random number generator for enemy spawning
+    std::srand(std::time(0));
+
+    // Game loop
+    while (running) {
+        // Handle events
+        SDL_Event event;
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) running = false;
+        }
+
+        // Player movement
+        const Uint8* keystates = SDL_GetKeyboardState(NULL);
+        if (keystates[SDL_SCANCODE_LEFT] && player.rect.x > 0) player.rect.x -= PLAYER_SPEED;
+        if (keystates[SDL_SCANCODE_RIGHT] && player.rect.x < WINDOW_WIDTH - player.rect.w) player.rect.x += PLAYER_SPEED;
+        if (keystates[SDL_SCANCODE_UP] && player.rect.y > 0) player.rect.y -= PLAYER_SPEED;
+        if (keystates[SDL_SCANCODE_DOWN] && player.rect.y < WINDOW_HEIGHT - player.rect.h) player.rect.y += PLAYER_SPEED;
+
+        // Shooting (300ms cooldown)
+        if (keystates[SDL_SCANCODE_SPACE] && SDL_GetTicks() - lastShot > 300) {
+            Bullet b = {{player.rect.x + player.rect.w / 2 - 2, player.rect.y, 5, 10}, true, bulletTexture};
+            bullets.push_back(b);
+            lastShot = SDL_GetTicks();
+        }
+
+        // Spawn enemies randomly
+        if (std::rand() % 100 < 2) { // 2% chance per frame
+            Enemy e = {{std::rand() % (WINDOW_WIDTH - 40), -50, 40, 40}, enemyTexture};
+            enemies.push_back(e);
+        }
+
+        // Update bullets
+        for (auto it = bullets.begin(); it != bullets.end();) {
+            it->rect.y -= BULLET_SPEED; // Move up (player bullets only in this version)
+            if (it->rect.y < 0) {
+                it = bullets.erase(it); // Remove if off-screen
+            } else {
+                ++it;
+            }
+        }
+
+        // Update enemies
+        for (auto& e : enemies) {
+            e.rect.y += ENEMY_SPEED; // Move down
+        }
+
+        // Collision detection (bullet vs enemy)
+        for (auto bIt = bullets.begin(); bIt != bullets.end();) {
+            bool hit = false;
+            for (auto eIt = enemies.begin(); eIt != enemies.end();) {
+                if (SDL_HasIntersection(&bIt->rect, &eIt->rect)) {
+                    eIt = enemies.erase(eIt); // Remove enemy
+                    hit = true;
+                    break;
+                } else {
+                    ++eIt;
+                }
+            }
+            if (hit) {
+                bIt = bullets.erase(bIt); // Remove bullet
+            } else {
+                ++bIt;
+            }
+        }
+
+        // Render everything
+        SDL_RenderClear(renderer);
+        renderBackground(renderer, bgTexture, bgY);
+        SDL_RenderCopy(renderer, player.texture, NULL, &player.rect);
+        for (const auto& e : enemies) SDL_RenderCopy(renderer, e.texture, NULL, &e.rect);
+        for (const auto& b : bullets) SDL_RenderCopy(renderer, b.texture, NULL, &b.rect);
+        SDL_RenderPresent(renderer);
+
+        // Cap frame rate to ~60 FPS
+        SDL_Delay(16);
+    }
+
+    // Cleanup
+    SDL_DestroyTexture(bgTexture);
+    SDL_DestroyTexture(playerTexture);
+    SDL_DestroyTexture(enemyTexture);
+    SDL_DestroyTexture(bulletTexture);
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    IMG_Quit();
+    SDL_Quit();
+
+    return 0;
+}
