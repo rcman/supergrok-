@@ -1,13 +1,19 @@
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
+#include <SDL2/SDL_mixer.h>
+#include <SDL2/SDL_ttf.h>
 #include <vector>
 #include <cstdlib>
 #include <ctime>
 #include <iostream>
 
 // Screen dimensions
-const int SCREEN_WIDTH = 640;
-const int SCREEN_HEIGHT = 480;
+const int SCREEN_WIDTH = 1920;
+const int SCREEN_HEIGHT = 1080;
+const int VIRTUAL_WIDTH = 640;   // Original game width
+const int VIRTUAL_HEIGHT = 480;  // Original game height
+const float SCALE_FACTOR = 2.25f; // 1080 / 480
+const int OFFSET_X = 240;        // (1920 - 1440) / 2
 
 // Player properties
 const float PLAYER_SPEED = 300.0f;
@@ -29,8 +35,8 @@ const int POWERUP_WIDTH = 16;
 const int POWERUP_HEIGHT = 16;
 
 struct Entity {
-    float x, y;
-    int w, h;
+    float x, y;  // Virtual coordinates
+    int w, h;    // Virtual size
     SDL_Texture* texture;
 };
 
@@ -67,7 +73,7 @@ int main(int argc, char* argv[]) {
     srand(time(NULL));
 
     // Initialize SDL
-    if (SDL_Init(SDL_INIT_VIDEO) < 0 || IMG_Init(IMG_INIT_PNG) == 0) {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0 || IMG_Init(IMG_INIT_PNG) == 0 || Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) < 0 || TTF_Init() < 0) {
         std::cerr << "SDL initialization failed: " << SDL_GetError() << std::endl;
         return -1;
     }
@@ -75,21 +81,24 @@ int main(int argc, char* argv[]) {
     SDL_Window* window = SDL_CreateWindow("Super Rapid Fire Clone", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, SCREEN_WIDTH, SCREEN_HEIGHT, SDL_WINDOW_SHOWN);
     SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
 
-    // Load assets (replace with your own PNGs)
-    SDL_Texture* playerTexture = loadTexture("player.png", renderer); // 32x32px ship
-    SDL_Texture* bulletTexture = loadTexture("bullet.png", renderer); // 8x16px bullet
-    SDL_Texture* enemyTexture = loadTexture("enemy.png", renderer);   // 32x32px enemy
-    SDL_Texture* powerUpTexture = loadTexture("powerup.png", renderer); // 16x16px power-up
-    SDL_Texture* bgTexture = loadTexture("background.png", renderer); // 640x960px scrolling bg
+    // Load assets
+    SDL_Texture* playerTexture = loadTexture("player.png", renderer);       // 32x32px
+    SDL_Texture* bulletTexture = loadTexture("bullet.png", renderer);       // 8x16px
+    SDL_Texture* enemyTexture = loadTexture("enemy.png", renderer);         // 32x32px
+    SDL_Texture* powerUpTexture = loadTexture("powerup.png", renderer);     // 16x16px
+    SDL_Texture* bgTexture = loadTexture("background.png", renderer);       // 640x960px
+    Mix_Chunk* shootSound = Mix_LoadWAV("shoot.wav");
+    Mix_Chunk* explosionSound = Mix_LoadWAV("explosion.wav");
+    TTF_Font* font = TTF_OpenFont("arial.ttf", 24);
 
     // Initialize player
-    Player player = { SCREEN_WIDTH / 2.0f - PLAYER_WIDTH / 2.0f, SCREEN_HEIGHT - PLAYER_HEIGHT - 20, PLAYER_WIDTH, PLAYER_HEIGHT, playerTexture, 10, 0 };
+    Player player = { VIRTUAL_WIDTH / 2.0f - PLAYER_WIDTH / 2.0f, VIRTUAL_HEIGHT - PLAYER_HEIGHT - 20, PLAYER_WIDTH, PLAYER_HEIGHT, playerTexture, 10, 0 };
 
     // Game objects
     std::vector<Bullet> bullets;
     std::vector<Enemy> enemies;
     std::vector<PowerUp> powerUps;
-    float bgY = 0.0f; // Background scroll position
+    float bgY = 0.0f; // Virtual scroll position
     int score = 0;
     int enemySpawnTimer = 0;
 
@@ -109,11 +118,11 @@ int main(int argc, char* argv[]) {
             if (e.type == SDL_QUIT) quit = true;
         }
 
-        // Player movement
+        // Player movement (virtual coordinates)
         if (keyboardState[SDL_SCANCODE_LEFT]) player.x -= PLAYER_SPEED * deltaTime;
         if (keyboardState[SDL_SCANCODE_RIGHT]) player.x += PLAYER_SPEED * deltaTime;
         if (player.x < 0) player.x = 0;
-        if (player.x + PLAYER_WIDTH > SCREEN_WIDTH) player.x = SCREEN_WIDTH - PLAYER_WIDTH;
+        if (player.x + PLAYER_WIDTH > VIRTUAL_WIDTH) player.x = VIRTUAL_WIDTH - PLAYER_WIDTH;
 
         // Shooting
         if (keyboardState[SDL_SCANCODE_SPACE] && player.shootCooldown <= 0) {
@@ -123,7 +132,8 @@ int main(int argc, char* argv[]) {
                 Bullet bullet2 = { player.x + PLAYER_WIDTH / 2 - BULLET_WIDTH / 2 - 20, player.y - BULLET_HEIGHT, BULLET_WIDTH, BULLET_HEIGHT, bulletTexture, true };
                 bullets.push_back(bullet2);
             }
-            player.shootCooldown = 10; // Frames cooldown
+            Mix_PlayChannel(-1, shootSound, 0);
+            player.shootCooldown = 10;
         }
         if (player.shootCooldown > 0) player.shootCooldown--;
 
@@ -137,16 +147,16 @@ int main(int argc, char* argv[]) {
         // Spawn enemies
         enemySpawnTimer--;
         if (enemySpawnTimer <= 0) {
-            Enemy enemy = { static_cast<float>(rand() % (SCREEN_WIDTH - ENEMY_WIDTH)), -ENEMY_HEIGHT, ENEMY_WIDTH, ENEMY_HEIGHT, enemyTexture, true };
+            Enemy enemy = { static_cast<float>(rand() % (VIRTUAL_WIDTH - ENEMY_WIDTH)), -ENEMY_HEIGHT, ENEMY_WIDTH, ENEMY_HEIGHT, enemyTexture, true };
             enemies.push_back(enemy);
-            enemySpawnTimer = 30 + (rand() % 20); // Random spawn interval
+            enemySpawnTimer = 30 + (rand() % 20);
         }
 
         // Update enemies
         for (auto& enemy : enemies) {
             if (!enemy.active) continue;
             enemy.y += ENEMY_SPEED * deltaTime;
-            if (enemy.y > SCREEN_HEIGHT) enemy.active = false;
+            if (enemy.y > VIRTUAL_HEIGHT) enemy.active = false;
 
             // Collision with player
             SDL_Rect playerRect = { static_cast<int>(player.x), static_cast<int>(player.y), PLAYER_WIDTH, PLAYER_HEIGHT };
@@ -163,9 +173,8 @@ int main(int argc, char* argv[]) {
                 if (SDL_HasIntersection(&bulletRect, &enemyRect)) {
                     bullet.active = false;
                     enemy.active = false;
+                    Mix_PlayChannel(-1, explosionSound, 0);
                     score += 10;
-
-                    // 10% chance to spawn power-up
                     if (rand() % 100 < 10) {
                         PowerUp powerUp = { enemy.x, enemy.y, POWERUP_WIDTH, POWERUP_HEIGHT, powerUpTexture, true };
                         powerUps.push_back(powerUp);
@@ -178,57 +187,68 @@ int main(int argc, char* argv[]) {
         for (auto& powerUp : powerUps) {
             if (!powerUp.active) continue;
             powerUp.y += ENEMY_SPEED * deltaTime;
-            if (powerUp.y > SCREEN_HEIGHT) powerUp.active = false;
+            if (powerUp.y > VIRTUAL_HEIGHT) powerUp.active = false;
 
             SDL_Rect powerUpRect = { static_cast<int>(powerUp.x), static_cast<int>(powerUp.y), POWERUP_WIDTH, POWERUP_HEIGHT };
             SDL_Rect playerRect = { static_cast<int>(player.x), static_cast<int>(player.y), PLAYER_WIDTH, PLAYER_HEIGHT };
             if (SDL_HasIntersection(&powerUpRect, &playerRect)) {
                 powerUp.active = false;
-                if (player.powerLevel < 1) player.powerLevel++; // Upgrade to double shot
+                if (player.powerLevel < 1) player.powerLevel++;
             }
         }
 
-        // Scroll background
-        bgY += 100.0f * deltaTime; // Scroll speed
-        if (bgY >= SCREEN_HEIGHT) bgY -= SCREEN_HEIGHT; // Seamless loop (bg is 640x960px)
+        // Scroll background (virtual coordinates)
+        bgY += 100.0f * deltaTime;
+        if (bgY >= VIRTUAL_HEIGHT) bgY -= VIRTUAL_HEIGHT;
 
         // Render
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
         SDL_RenderClear(renderer);
 
-        // Render background (two copies for seamless scrolling)
-        SDL_Rect bgRect1 = { 0, static_cast<int>(bgY - SCREEN_HEIGHT), SCREEN_WIDTH, SCREEN_HEIGHT };
-        SDL_Rect bgRect2 = { 0, static_cast<int>(bgY), SCREEN_WIDTH, SCREEN_HEIGHT };
-        SDL_RenderCopy(renderer, bgTexture, NULL, &bgRect1);
-        SDL_RenderCopy(renderer, bgTexture, NULL, &bgRect2);
+        // Render background
+        SDL_Rect bgSrc1 = { 0, static_cast<int>(bgY), VIRTUAL_WIDTH, VIRTUAL_HEIGHT - static_cast<int>(bgY) };
+        SDL_Rect bgDst1 = { OFFSET_X, 0, static_cast<int>(VIRTUAL_WIDTH * SCALE_FACTOR), static_cast<int>((VIRTUAL_HEIGHT - bgY) * SCALE_FACTOR) };
+        SDL_Rect bgSrc2 = { 0, 0, VIRTUAL_WIDTH, static_cast<int>(bgY) };
+        SDL_Rect bgDst2 = { OFFSET_X, static_cast<int>((VIRTUAL_HEIGHT - bgY) * SCALE_FACTOR), static_cast<int>(VIRTUAL_WIDTH * SCALE_FACTOR), static_cast<int>(bgY * SCALE_FACTOR) };
+        SDL_RenderCopy(renderer, bgTexture, &bgSrc1, &bgDst1);
+        SDL_RenderCopy(renderer, bgTexture, &bgSrc2, &bgDst2);
 
         // Render player
-        SDL_Rect playerRect = { static_cast<int>(player.x), static_cast<int>(player.y), PLAYER_WIDTH, PLAYER_HEIGHT };
-        SDL_RenderCopy(renderer, player.texture, NULL, &playerRect);
+        SDL_Rect playerDst = { static_cast<int>(player.x * SCALE_FACTOR) + OFFSET_X, static_cast<int>(player.y * SCALE_FACTOR), static_cast<int>(PLAYER_WIDTH * SCALE_FACTOR), static_cast<int>(PLAYER_HEIGHT * SCALE_FACTOR) };
+        SDL_RenderCopy(renderer, player.texture, NULL, &playerDst);
 
         // Render bullets
         for (const auto& bullet : bullets) {
             if (bullet.active) {
-                SDL_Rect bulletRect = { static_cast<int>(bullet.x), static_cast<int>(bullet.y), BULLET_WIDTH, BULLET_HEIGHT };
-                SDL_RenderCopy(renderer, bullet.texture, NULL, &bulletRect);
+                SDL_Rect bulletDst = { static_cast<int>(bullet.x * SCALE_FACTOR) + OFFSET_X, static_cast<int>(bullet.y * SCALE_FACTOR), static_cast<int>(BULLET_WIDTH * SCALE_FACTOR), static_cast<int>(BULLET_HEIGHT * SCALE_FACTOR) };
+                SDL_RenderCopy(renderer, bullet.texture, NULL, &bulletDst);
             }
         }
 
         // Render enemies
         for (const auto& enemy : enemies) {
             if (enemy.active) {
-                SDL_Rect enemyRect = { static_cast<int>(enemy.x), static_cast<int>(enemy.y), ENEMY_WIDTH, ENEMY_HEIGHT };
-                SDL_RenderCopy(renderer, enemy.texture, NULL, &enemyRect);
+                SDL_Rect enemyDst = { static_cast<int>(enemy.x * SCALE_FACTOR) + OFFSET_X, static_cast<int>(enemy.y * SCALE_FACTOR), static_cast<int>(ENEMY_WIDTH * SCALE_FACTOR), static_cast<int>(ENEMY_HEIGHT * SCALE_FACTOR) };
+                SDL_RenderCopy(renderer, enemy.texture, NULL, &enemyDst);
             }
         }
 
         // Render power-ups
         for (const auto& powerUp : powerUps) {
             if (powerUp.active) {
-                SDL_Rect powerUpRect = { static_cast<int>(powerUp.x), static_cast<int>(powerUp.y), POWERUP_WIDTH, POWERUP_HEIGHT };
-                SDL_RenderCopy(renderer, powerUp.texture, NULL, &powerUpRect);
+                SDL_Rect powerUpDst = { static_cast<int>(powerUp.x * SCALE_FACTOR) + OFFSET_X, static_cast<int>(powerUp.y * SCALE_FACTOR), static_cast<int>(POWERUP_WIDTH * SCALE_FACTOR), static_cast<int>(POWERUP_HEIGHT * SCALE_FACTOR) };
+                SDL_RenderCopy(renderer, powerUp.texture, NULL, &powerUpDst);
             }
         }
+
+        // Render score
+        std::string scoreText = "Score: " + std::to_string(score);
+        SDL_Surface* textSurface = TTF_RenderText_Solid(font, scoreText.c_str(), {255, 255, 255});
+        SDL_Texture* textTexture = SDL_CreateTextureFromSurface(renderer, textSurface);
+        SDL_Rect textDst = { OFFSET_X + 10, 10, textSurface->w, textSurface->h };
+        SDL_RenderCopy(renderer, textTexture, NULL, &textDst);
+        SDL_FreeSurface(textSurface);
+        SDL_DestroyTexture(textTexture);
 
         SDL_RenderPresent(renderer);
         SDL_Delay(16); // ~60 FPS
@@ -240,9 +260,14 @@ int main(int argc, char* argv[]) {
     SDL_DestroyTexture(enemyTexture);
     SDL_DestroyTexture(powerUpTexture);
     SDL_DestroyTexture(bgTexture);
+    Mix_FreeChunk(shootSound);
+    Mix_FreeChunk(explosionSound);
+    TTF_CloseFont(font);
+    Mix_CloseAudio();
+    TTF_Quit();
+    IMG_Quit();
     SDL_DestroyRenderer(renderer);
     SDL_DestroyWindow(window);
-    IMG_Quit();
     SDL_Quit();
 
     return 0;
