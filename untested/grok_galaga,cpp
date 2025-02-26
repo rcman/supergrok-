@@ -1,0 +1,446 @@
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_image.h>
+#include <SDL2/SDL_mixer.h>
+#include <vector>
+#include <iostream>
+#include <cmath>
+
+const int SCREEN_WIDTH = 896;  // Original resolution scaled up (224x288 * 4)
+const int SCREEN_HEIGHT = 1152;
+const int PLAYER_SPEED = 4;
+const int BULLET_SPEED = 8;
+const int ENEMY_SPEED = 2;
+const int FORMATION_ROWS = 5;
+const int FORMATION_COLS = 10;
+
+// Structs for game objects
+struct Vector2 {
+    int x, y;
+};
+
+struct Player {
+    Vector2 pos;
+    SDL_Texture* singleTexture;
+    SDL_Texture* doubleTexture;
+    int width = 32, height = 32;
+    bool isDouble = false;
+    int lives = 2; // Starting lives (plus current ship)
+    int shootCooldown = 0;
+};
+
+struct Bullet {
+    Vector2 pos;
+    Vector2 velocity;
+    SDL_Texture* texture;
+    bool active = false;
+    bool isEnemy = false;
+};
+
+struct Enemy {
+    Vector2 pos;
+    Vector2 velocity;
+    SDL_Texture* texture;
+    int width = 32, height = 32;
+    int type = 0; // 0 = Bee, 1 = Butterfly, 2 = Boss
+    bool active = true;
+    bool inFormation = true;
+    int formationX, formationY; // Grid position
+    int attackPhase = 0; // For swooping
+    float attackAngle = 0;
+    bool capturing = false;
+};
+
+struct Explosion {
+    Vector2 pos;
+    SDL_Texture* texture;
+    int frame = 0;
+    bool active = false;
+};
+
+// Global variables
+SDL_Window* window = nullptr;
+SDL_Renderer* renderer = nullptr;
+Mix_Chunk* shootSound = nullptr;
+Mix_Chunk* enemyShootSound = nullptr;
+Mix_Chunk* explosionSound = nullptr;
+Mix_Chunk* captureSound = nullptr;
+Mix_Chunk* rescueSound = nullptr;
+Mix_Music* themeMusic = nullptr;
+Mix_Music* challengeMusic = nullptr;
+Player player;
+std::vector<Bullet> bullets;
+std::vector<Enemy> enemies;
+std::vector<Explosion> explosions;
+SDL_Texture* backgroundTexture;
+int score = 0;
+int stage = 1;
+bool isChallengeStage = false;
+int enemiesLeft = 0;
+bool playerCaptured = false;
+Enemy* capturedShip = nullptr;
+
+bool initSDL() {
+    if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO) < 0) return false;
+    window = SDL_CreateWindow("Galaga Clone", SDL_WINDOWPOS_UNDEFINED, SDL_WINDOWPOS_UNDEFINED, SCREEN_WIDTH, SCREEN_HEIGHT, SDL_WINDOW_SHOWN);
+    if (!window) return false;
+    renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+    if (!renderer) return false;
+    IMG_Init(IMG_INIT_PNG);
+    Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048);
+    return true;
+}
+
+SDL_Texture* loadTexture(const char* path) {
+    SDL_Surface* surface = IMG_Load(path);
+    if (!surface) {
+        std::cerr << "Failed to load image: " << IMG_GetError() << std::endl;
+        return nullptr;
+    }
+    SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
+    SDL_FreeSurface(surface);
+    return texture;
+}
+
+void loadAssets() {
+    player.singleTexture = loadTexture("player.png");
+    player.doubleTexture = loadTexture("player_double.png");
+    player.pos = {SCREEN_WIDTH / 2 - player.width / 2, SCREEN_HEIGHT - 64};
+
+    backgroundTexture = loadTexture("background.png");
+
+    // Initial enemy formation
+    for (int y = 0; y < FORMATION_ROWS; y++) {
+        for (int x = 0; x < FORMATION_COLS; x++) {
+            Enemy enemy;
+            enemy.pos = {SCREEN_WIDTH / 2 - FORMATION_COLS * 40 / 2 + x * 40, y * 40 + 100};
+            enemy.formationX = x;
+            enemy.formationY = y;
+            if (y == 0) {
+                enemy.type = 2; // Boss
+                enemy.texture = loadTexture("boss.png");
+                enemy.health = 2; // Boss takes 2 hits
+            } else if (y < 3) {
+                enemy.type = 1; // Butterfly
+                enemy.texture = loadTexture("butterfly.png");
+            } else {
+                enemy.type = 0; // Bee
+                enemy.texture = loadTexture("bee.png");
+            }
+            enemies.push_back(enemy);
+        }
+    }
+    enemiesLeft = enemies.size();
+
+    bullets.resize(20);
+    for (auto& bullet : bullets) {
+        bullet.texture = loadTexture(bullet.isEnemy ? "enemy_bullet.png" : "bullet.png");
+    }
+    explosions.resize(10);
+    for (auto& explosion : explosions) {
+        explosion.texture = loadTexture("explosion.png");
+    }
+
+    shootSound = Mix_LoadWAV("shoot.wav");
+    enemyShootSound = Mix_LoadWAV("enemy_shoot.wav");
+    explosionSound = Mix_LoadWAV("explosion.wav");
+    captureSound = Mix_LoadWAV("capture.wav");
+    rescueSound = Mix_LoadWAV("rescue.wav");
+    themeMusic = Mix_LoadMUS("theme.wav");
+    challengeMusic = Mix_LoadMUS("challenge.wav");
+    Mix_PlayMusic(themeMusic, -1);
+}
+
+void handleInput(bool& running) {
+    SDL_Event e;
+    while (SDL_PollEvent(&e)) {
+        if (e.type == SDL_QUIT) running = false;
+    }
+
+    const Uint8* keys = SDL_GetKeyboardState(nullptr);
+    player.velocity.x = 0;
+
+    if (keys[SDL_SCANCODE_LEFT] && player.pos.x > 0) player.velocity.x = -PLAYER_SPEED;
+    if (keys[SDL_SCANCODE_RIGHT] && player.pos.x < SCREEN_WIDTH - (player.isDouble ? player.width * 2 : player.width)) player.velocity.x = PLAYER_SPEED;
+    if (keys[SDL_SCANCODE_SPACE] && player.shootCooldown == 0) {
+        for (auto& bullet : bullets) {
+            if (!bullet.active) {
+                bullet.pos = {player.pos.x + player.width / 2 - 8, player.pos.y};
+                bullet.velocity = {0, -BULLET_SPEED};
+                bullet.isEnemy = false;
+                bullet.active = true;
+                Mix_PlayChannel(-1, shootSound, 0);
+                if (player.isDouble) {
+                    Bullet secondBullet = bullet;
+                    secondBullet.pos.x += player.width;
+                    bullets.push_back(secondBullet);
+                }
+                player.shootCooldown = player.isDouble ? 15 : 20; // Faster with double
+                break;
+            }
+        }
+    }
+    if (player.shootCooldown > 0) player.shootCooldown--;
+}
+
+void update() {
+    // Update player
+    player.pos.x += player.velocity.x;
+
+    // Formation movement
+    static int formationDir = 1;
+    static int formationTimer = 0;
+    formationTimer++;
+    if (formationTimer % 60 == 0) formationDir = -formationDir;
+
+    // Update enemies
+    for (auto& enemy : enemies) {
+        if (!enemy.active) continue;
+
+        if (enemy.inFormation) {
+            enemy.pos.x += formationDir;
+            if (enemy.pos.x < 100 || enemy.pos.x > SCREEN_WIDTH - 100) formationDir = -formationDir;
+        } else {
+            // Swooping attack
+            if (enemy.attackPhase == 0) { // Dive
+                enemy.pos.y += ENEMY_SPEED;
+                enemy.pos.x += sin(enemy.attackAngle) * ENEMY_SPEED;
+                enemy.attackAngle += 0.05;
+                if (enemy.pos.y > SCREEN_HEIGHT / 2) enemy.attackPhase = 1;
+            } else if (enemy.attackPhase == 1) { // Loop
+                enemy.pos.y -= ENEMY_SPEED;
+                enemy.pos.x += cos(enemy.attackAngle) * ENEMY_SPEED;
+                enemy.attackAngle += 0.05;
+                if (enemy.pos.y < 100) enemy.attackPhase = 2;
+            } else { // Return
+                enemy.pos.y += ENEMY_SPEED;
+                if (enemy.pos.y > SCREEN_HEIGHT) {
+                    enemy.pos = {SCREEN_WIDTH / 2 - FORMATION_COLS * 40 / 2 + enemy.formationX * 40, enemy.formationY * 40 + 100};
+                    enemy.inFormation = true;
+                    enemy.attackPhase = 0;
+                }
+            }
+
+            // Tractor beam
+            if (enemy.type == 2 && enemy.attackPhase == 1 && !playerCaptured && abs(enemy.pos.x - player.pos.x) < 50 && rand() % 500 == 0) {
+                enemy.capturing = true;
+                Mix_PlayChannel(-1, captureSound, 0);
+            }
+            if (enemy.capturing) {
+                if (enemy.pos.y >= player.pos.y) {
+                    playerCaptured = true;
+                    capturedShip = &enemy;
+                    enemy.pos = player.pos;
+                    enemy.velocity = {0, -ENEMY_SPEED};
+                }
+            }
+        }
+
+        // Enemy shooting
+        if (rand() % 200 == 0 && !enemy.inFormation) {
+            for (auto& bullet : bullets) {
+                if (!bullet.active) {
+                    bullet.pos = {enemy.pos.x + enemy.width / 2 - 8, enemy.pos.y + enemy.height};
+                    bullet.velocity = {0, BULLET_SPEED};
+                    bullet.isEnemy = true;
+                    bullet.active = true;
+                    Mix_PlayChannel(-1, enemyShootSound, 0);
+                    break;
+                }
+            }
+        }
+    }
+
+    // Update captured ship
+    if (playerCaptured && capturedShip) {
+        capturedShip->pos.y -= ENEMY_SPEED;
+        player.pos = capturedShip->pos;
+        if (capturedShip->pos.y < 100) {
+            player.lives--;
+            player.pos = {SCREEN_WIDTH / 2 - player.width / 2, SCREEN_HEIGHT - 64};
+            playerCaptured = false;
+            capturedShip->capturing = false;
+            capturedShip->inFormation = true;
+            capturedShip = nullptr;
+            if (player.lives < 0) player.lives = 0; // Game over
+        }
+    }
+
+    // Update bullets
+    for (auto& bullet : bullets) {
+        if (bullet.active) {
+            bullet.pos.x += bullet.velocity.x;
+            bullet.pos.y += bullet.velocity.y;
+            if (bullet.pos.y < -16 || bullet.pos.y > SCREEN_HEIGHT) bullet.active = false;
+
+            SDL_Rect bulletRect = {bullet.pos.x, bullet.pos.y, 16, 16};
+            if (!bullet.isEnemy) {
+                for (auto& enemy : enemies) {
+                    if (!enemy.active) continue;
+                    SDL_Rect enemyRect = {enemy.pos.x, enemy.pos.y, enemy.width, enemy.height};
+                    if (SDL_HasIntersection(&bulletRect, &enemyRect)) {
+                        bullet.active = false;
+                        enemy.health--;
+                        if (enemy.health <= 0) {
+                            enemy.active = false;
+                            enemiesLeft--;
+                            score += (enemy.type == 0 ? 50 : enemy.type == 1 ? 100 : enemy.inFormation ? 160 : 400); // Formation bonus
+                            Explosion exp = {{enemy.pos.x, enemy.pos.y}, explosions[0].texture, 0, true};
+                            explosions.push_back(exp);
+                            Mix_PlayChannel(-1, explosionSound, 0);
+                            if (enemy.capturing && capturedShip == &enemy) {
+                                playerCaptured = false;
+                                player.isDouble = true;
+                                capturedShip = nullptr;
+                                score += 1000; // Rescue bonus
+                                Mix_PlayChannel(-1, rescueSound, 0);
+                            }
+                        }
+                    }
+                }
+            } else {
+                SDL_Rect playerRect = {player.pos.x, player.pos.y, player.width, player.isDouble ? player.width * 2 : player.width};
+                if (SDL_HasIntersection(&bulletRect, &playerRect)) {
+                    bullet.active = false;
+                    player.lives--;
+                    player.pos = {SCREEN_WIDTH / 2 - player.width / 2, SCREEN_HEIGHT - 64};
+                    player.isDouble = false;
+                    Explosion exp = {{player.pos.x, player.pos.y}, explosions[0].texture, 0, true};
+                    explosions.push_back(exp);
+                    Mix_PlayChannel(-1, explosionSound, 0);
+                    if (player.lives < 0) player.lives = 0;
+                }
+            }
+        }
+    }
+
+    // Update explosions
+    for (auto& explosion : explosions) {
+        if (explosion.active) {
+            explosion.frame++;
+            if (explosion.frame >= 4) explosion.active = false; // 4-frame animation
+        }
+    }
+
+    // Stage progression
+    if (enemiesLeft == 0) {
+        stage++;
+        isChallengeStage = (stage % 4 == 0);
+        Mix_PlayMusic(isChallengeStage ? challengeMusic : themeMusic, -1);
+        enemies.clear();
+        enemiesLeft = 0;
+        for (int y = 0; y < FORMATION_ROWS; y++) {
+            for (int x = 0; x < FORMATION_COLS; x++) {
+                Enemy enemy;
+                enemy.pos = {SCREEN_WIDTH / 2 - FORMATION_COLS * 40 / 2 + x * 40, y * 40 + 100};
+                enemy.formationX = x;
+                enemy.formationY = y;
+                enemy.type = (y == 0 ? 2 : y < 3 ? 1 : 0);
+                enemy.texture = loadTexture(y == 0 ? "boss.png" : y < 3 ? "butterfly.png" : "bee.png");
+                enemy.health = (y == 0 ? 2 : 1);
+                enemies.push_back(enemy);
+                enemiesLeft++;
+            }
+        }
+        // Challenge stage: enemies swoop immediately
+        if (isChallengeStage) {
+            for (auto& enemy : enemies) {
+                enemy.inFormation = false;
+                enemy.attackPhase = 0;
+                enemy.attackAngle = (rand() % 360) * 3.14159 / 180;
+            }
+        }
+    }
+
+    // Random enemy attack
+    if (!isChallengeStage && rand() % 100 == 0) {
+        for (auto& enemy : enemies) {
+            if (enemy.active && enemy.inFormation && rand() % 10 == 0) {
+                enemy.inFormation = false;
+                enemy.attackPhase = 0;
+                enemy.attackAngle = 0;
+                break;
+            }
+        }
+    }
+}
+
+void render() {
+    SDL_RenderClear(renderer);
+
+    // Render background
+    SDL_Rect bgRect = {0, 0, SCREEN_WIDTH, SCREEN_HEIGHT};
+    SDL_RenderCopy(renderer, backgroundTexture, nullptr, &bgRect);
+
+    // Render enemies
+    for (const auto& enemy : enemies) {
+        if (enemy.active) {
+            SDL_Rect enemyRect = {enemy.pos.x, enemy.pos.y, enemy.width, enemy.height};
+            SDL(RenderCopy(renderer, enemy.texture, nullptr, &enemyRect);
+        }
+    }
+
+    // Render bullets
+    for (const auto& bullet : bullets) {
+        if (bullet.active) {
+            SDL_Rect bulletRect = {bullet.pos.x, bullet.pos.y, 16, 16};
+            SDL_RenderCopy(renderer, bullet.texture, nullptr, &bulletRect);
+        }
+    }
+
+    // Render explosions
+    for (const auto& explosion : explosions) {
+        if (explosion.active) {
+            SDL_Rect srcRect = {explosion.frame * 32, 0, 32, 32};
+            SDL_Rect dstRect = {explosion.pos.x, explosion.pos.y, 32, 32};
+            SDL_RenderCopy(renderer, explosion.texture, &srcRect, &dstRect);
+        }
+    }
+
+    // Render player
+    SDL_Rect playerRect = {player.pos.x, player.pos.y, player.width, player.height};
+    if (player.isDouble) {
+        playerRect.width = player.width * 2;
+        SDL_RenderCopy(renderer, player.doubleTexture, nullptr, &playerRect);
+    } else {
+        SDL_RenderCopy(renderer, player.singleTexture, nullptr, &playerRect);
+    }
+
+    SDL_RenderPresent(renderer);
+}
+
+void cleanup() {
+    SDL_DestroyTexture(player.singleTexture);
+    SDL_DestroyTexture(player.doubleTexture);
+    SDL_DestroyTexture(backgroundTexture);
+    for (auto& enemy : enemies) SDL_DestroyTexture(enemy.texture);
+    for (auto& bullet : bullets) SDL_DestroyTexture(bullet.texture);
+    for (auto& explosion : explosions) SDL_DestroyTexture(explosion.texture);
+    Mix_FreeChunk(shootSound);
+    Mix_FreeChunk(enemyShootSound);
+    Mix_FreeChunk(explosionSound);
+    Mix_FreeChunk(captureSound);
+    Mix_FreeChunk(rescueSound);
+    Mix_FreeMusic(themeMusic);
+    Mix_FreeMusic(challengeMusic);
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    Mix_Quit();
+    IMG_Quit();
+    SDL_Quit();
+}
+
+int main(int argc, char* args[]) {
+    if (!initSDL()) return 1;
+    loadAssets();
+
+    bool running = true;
+    while (running && player.lives >= 0) {
+        handleInput(running);
+        update();
+        render();
+        SDL_Delay(16); // ~60 FPS
+    }
+
+    cleanup();
+    return 0;
+}
