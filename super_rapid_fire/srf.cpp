@@ -6,42 +6,53 @@
 #include <cstdlib>
 #include <ctime>
 
-// Window dimensions
+// Window dimensions and frame rate
 const int WINDOW_WIDTH = 512;
 const int WINDOW_HEIGHT = 512;
+const int TARGET_FPS = 60;
+const float TARGET_DELTA = 1.0f / TARGET_FPS;
 
 // Player structure
 struct Player {
     float x = WINDOW_WIDTH / 2;
     float y = WINDOW_HEIGHT - 100;
-    float speed = 5.0f;
-    int fireRate = 10; // Frames between shots
+    float speed = 200.0f; // Pixels per second
+    int fireRate = 10;    // Frames between shots
     int fireCounter = 0;
-    int shotLevel = 1; // Power-up level
+    int shotLevel = 1;    // Power-up level
     int health = 3;
+    float width = 32.0f;
+    float height = 32.0f;
 };
 
 // Bullet structure
 struct Bullet {
     float x, y;
-    float speed = -10.0f; // Negative for upward movement
+    float speed = -600.0f; // Pixels per second (upward)
     bool active = true;
+    float width = 8.0f;
+    float height = 16.0f;
 };
 
 // Enemy structure
 struct Enemy {
     float x, y;
-    float speed;
+    float speed = 100.0f; // Pixels per second
     int health = 1;
     int type; // 0: straight, 1: sine wave
-    float angle = 0.0f; // For sine movement
+    float angle = 0.0f;
+    float startX;
+    float width = 32.0f;
+    float height = 32.0f;
 };
 
 // Power-up structure
 struct PowerUp {
     float x, y;
-    float speed = 2.0f;
+    float speed = 100.0f; // Pixels per second
     bool active = true;
+    float width = 16.0f;
+    float height = 16.0f;
 };
 
 // Function to load textures
@@ -50,6 +61,133 @@ SDL_Texture* loadTexture(const char* filepath, SDL_Renderer* renderer) {
     SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
     SDL_FreeSurface(surface);
     return texture;
+}
+
+// AABB collision detection
+bool AABBCollision(float ax, float ay, float aw, float ah, float bx, float by, float bw, float bh) {
+    return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+}
+
+// Update player function
+void updatePlayer(Player& player, const Uint8* keys, std::vector<Bullet>& bullets, float delta) {
+    if (keys[SDL_SCANCODE_UP] && player.y > 0) player.y -= player.speed * delta;
+    if (keys[SDL_SCANCODE_DOWN] && player.y < WINDOW_HEIGHT - player.height) player.y += player.speed * delta;
+    if (keys[SDL_SCANCODE_LEFT] && player.x > 0) player.x -= player.speed * delta;
+    if (keys[SDL_SCANCODE_RIGHT] && player.x < WINDOW_WIDTH - player.width) player.x += player.speed * delta;
+
+    if (keys[SDL_SCANCODE_SPACE] && player.fireCounter <= 0) {
+        if (player.shotLevel == 1) {
+            bullets.push_back({player.x + 12, player.y, -600.0f});
+        } else if (player.shotLevel == 2) { // Spread shot
+            bullets.push_back({player.x + 12, player.y, -600.0f});
+            bullets.push_back({player.x + 8, player.y, -480.0f});
+            bullets.push_back({player.x + 16, player.y, -480.0f});
+        }
+        player.fireCounter = player.fireRate;
+        // Play shoot sound (commented out for brevity)
+    }
+    if (player.fireCounter > 0) player.fireCounter--;
+}
+
+// Update bullets function
+void updateBullets(std::vector<Bullet>& bullets, float delta) {
+    for (auto& bullet : bullets) {
+        if (bullet.active) {
+            bullet.y += bullet.speed * delta;
+            if (bullet.y < 0) bullet.active = false;
+        }
+    }
+}
+
+// Update enemies function
+void updateEnemies(std::vector<Enemy>& enemies, std::vector<Bullet>& bullets, int& score, float delta) {
+    for (auto it = enemies.begin(); it != enemies.end();) {
+        if (it->type == 0) {
+            it->y += it->speed * delta; // Straight down
+        } else {
+            it->y += it->speed * delta;
+            it->x = it->startX + sin(it->y * 0.05f) * 50.0f; // Sine wave tied to y-position
+        }
+
+        // Keep enemies within horizontal bounds
+        if (it->x < 0) it->x = 0;
+        if (it->x > WINDOW_WIDTH - it->width) it->x = WINDOW_WIDTH - it->width;
+
+        for (auto& bullet : bullets) {
+            if (bullet.active && AABBCollision(bullet.x, bullet.y, bullet.width, bullet.height, it->x, it->y, it->width, it->height)) {
+                it->health--;
+                bullet.active = false;
+                // Play explosion sound (commented out for brevity)
+            }
+        }
+
+        if (it->health <= 0 || it->y > WINDOW_HEIGHT) {
+            if (it->health <= 0) score += 100;
+            it = enemies.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+// Update power-ups function
+void updatePowerUps(std::vector<PowerUp>& powerups, Player& player, float delta) {
+    for (auto it = powerups.begin(); it != powerups.end();) {
+        it->y += it->speed * delta;
+        if (AABBCollision(player.x, player.y, player.width, player.height, it->x, it->y, it->width, it->height)) {
+            player.shotLevel = 2; // Upgrade to spread shot
+            it->active = false;
+        }
+        if (!it->active || it->y > WINDOW_HEIGHT) {
+            it = powerups.erase(it);
+        } else {
+            ++it;
+        }
+    }
+}
+
+// Render function
+void render(SDL_Renderer* renderer, SDL_Texture* playerTexture, SDL_Texture* enemyTexture, SDL_Texture* bulletTexture, SDL_Texture* powerupTexture, SDL_Texture* backgroundTexture, const Player& player, const std::vector<Bullet>& bullets, const std::vector<Enemy>& enemies, const std::vector<PowerUp>& powerups, float backgroundY, int score, TTF_Font* font) {
+    // Render background
+    SDL_Rect bgRect1 = {0, (int)(backgroundY - 1024), WINDOW_WIDTH, 1024};
+    SDL_Rect bgRect2 = {0, (int)backgroundY, WINDOW_WIDTH, 1024};
+    SDL_RenderCopy(renderer, backgroundTexture, NULL, &bgRect1);
+    SDL_RenderCopy(renderer, backgroundTexture, NULL, &bgRect2);
+
+    // Render player
+    SDL_Rect playerRect = {(int)player.x, (int)player.y, 32, 32};
+    SDL_RenderCopy(renderer, playerTexture, NULL, &playerRect);
+
+    // Render bullets
+    for (const auto& bullet : bullets) {
+        if (bullet.active) {
+            SDL_Rect rect = {(int)bullet.x, (int)bullet.y, 8, 16};
+            SDL_RenderCopy(renderer, bulletTexture, NULL, &rect);
+        }
+    }
+
+    // Render enemies
+    for (const auto& enemy : enemies) {
+        SDL_Rect rect = {(int)enemy.x, (int)enemy.y, 32, 32};
+        SDL_RenderCopy(renderer, enemyTexture, NULL, &rect);
+    }
+
+    // Render power-ups
+    for (const auto& powerup : powerups) {
+        if (powerup.active) {
+            SDL_Rect rect = {(int)powerup.x, (int)powerup.y, 16, 16};
+            SDL_RenderCopy(renderer, powerupTexture, NULL, &rect);
+        }
+    }
+
+    // Render score
+    SDL_Color white = {255, 255, 255};
+    SDL_Surface* scoreSurface = TTF_RenderText_Solid(font, ("Score: " + std::to_string(score)).c_str(), white);
+    SDL_Texture* scoreTexture = SDL_CreateTextureFromSurface(renderer, scoreSurface);
+    SDL_Rect scoreRect = {10, 10, scoreSurface->w, scoreSurface->h};
+    SDL_RenderCopy(renderer, scoreTexture, NULL, &scoreRect);
+    SDL_FreeSurface(scoreSurface);
+    SDL_DestroyTexture(scoreTexture);
 }
 
 int main(int argc, char* argv[]) {
@@ -104,11 +242,6 @@ int main(int argc, char* argv[]) {
     SDL_Texture* powerupTexture = loadTexture("powerup.bmp", renderer);
     SDL_Texture* backgroundTexture = loadTexture("background.bmp", renderer);
 
-    // Load sounds (replace with actual file paths)
-    Mix_Music* bgMusic = Mix_LoadMUS("background.mp3");
-    Mix_Chunk* shootSound = Mix_LoadWAV("shoot.wav");
-    Mix_Chunk* explosionSound = Mix_LoadWAV("explosion.wav");
-
     // Load font for score (replace with actual font file)
     TTF_Font* font = TTF_OpenFont("font.ttf", 24);
     if (!font) {
@@ -122,22 +255,25 @@ int main(int argc, char* argv[]) {
     std::vector<Enemy> enemies;
     std::vector<PowerUp> powerups;
     float backgroundY = 0.0f;
-    const float scrollSpeed = 2.0f;
-    const int backgroundHeight = 1024; // Assuming background is 512x1024
     int score = 0;
 
     // Enemy spawn timer
     Uint32 enemySpawnTimer = 0;
-    const Uint32 spawnInterval = 1000; // Spawn every 1 second
+    const Uint32 spawnInterval = 1000; // Spawn every 1 second (in ms)
 
     // Game loop
     bool running = true;
     SDL_Event event;
-
-    // Play background music
-    Mix_PlayMusic(bgMusic, -1);
+    Uint32 lastTime = SDL_GetTicks();
+    Uint32 currentTime;
 
     while (running) {
+        // Calculate delta time
+        currentTime = SDL_GetTicks();
+        float delta = (currentTime - lastTime) / 1000.0f; // Delta time in seconds
+        lastTime = currentTime;
+
+        // Event handling
         while (SDL_PollEvent(&event)) {
             if (event.type == SDL_QUIT) running = false;
         }
@@ -148,133 +284,57 @@ int main(int argc, char* argv[]) {
         SDL_RenderClear(renderer);
 
         // Update background
-        backgroundY += scrollSpeed;
-        if (backgroundY >= backgroundHeight) backgroundY = 0;
-
-        // Render background
-        SDL_Rect bgRect1 = {0, (int)(backgroundY - backgroundHeight), WINDOW_WIDTH, backgroundHeight};
-        SDL_Rect bgRect2 = {0, (int)backgroundY, WINDOW_WIDTH, backgroundHeight};
-        SDL_RenderCopy(renderer, backgroundTexture, NULL, &bgRect1);
-        SDL_RenderCopy(renderer, backgroundTexture, NULL, &bgRect2);
+        backgroundY += 100.0f * delta; // Scroll speed: 100 pixels per second
+        if (backgroundY >= 1024) backgroundY -= 1024; // Loop background
 
         // Update player
-        if (keys[SDL_SCANCODE_UP] && player.y > 0) player.y -= player.speed;
-        if (keys[SDL_SCANCODE_DOWN] && player.y < WINDOW_HEIGHT - 32) player.y += player.speed;
-        if (keys[SDL_SCANCODE_LEFT] && player.x > 0) player.x -= player.speed;
-        if (keys[SDL_SCANCODE_RIGHT] && player.x < WINDOW_WIDTH - 32) player.x += player.speed;
-
-        if (keys[SDL_SCANCODE_SPACE] && player.fireCounter <= 0) {
-            if (player.shotLevel == 1) {
-                bullets.push_back({player.x + 12, player.y, -10.0f});
-            } else if (player.shotLevel == 2) { // Spread shot
-                bullets.push_back({player.x + 12, player.y, -10.0f});
-                bullets.push_back({player.x + 8, player.y, -8.0f});
-                bullets.push_back({player.x + 16, player.y, -8.0f});
-            }
-            player.fireCounter = player.fireRate;
-            Mix_PlayChannel(-1, shootSound, 0);
-        }
-        if (player.fireCounter > 0) player.fireCounter--;
+        updatePlayer(player, keys, bullets, delta);
 
         // Update bullets
-        for (auto& bullet : bullets) {
-            if (bullet.active) {
-                bullet.y += bullet.speed;
-                if (bullet.y < 0) bullet.active = false;
-            }
-        }
+        updateBullets(bullets, delta);
 
-        // Spawn enemies
+        // Spawn enemies and power-ups
         if (SDL_GetTicks() - enemySpawnTimer > spawnInterval) {
             int type = rand() % 2;
-            enemies.push_back({(float)(rand() % (WINDOW_WIDTH - 32)), 0, 3.0f, 1, type});
+            float startX = (float)(rand() % (WINDOW_WIDTH - 32));
+            enemies.push_back({startX, 0, 100.0f, 1, type, 0.0f, startX});
             if (rand() % 10 == 0) powerups.push_back({(float)(rand() % (WINDOW_WIDTH - 16)), 0});
             enemySpawnTimer = SDL_GetTicks();
         }
 
         // Update enemies
-        for (auto it = enemies.begin(); it != enemies.end();) {
-            if (it->type == 0) {
-                it->y += it->speed; // Straight down
-            } else {
-                it->y += it->speed;
-                it->x += sin(it->angle) * 5.0f; // Sine wave
-                it->angle += 0.1f;
-            }
-
-            for (auto& bullet : bullets) {
-                if (bullet.active && abs(bullet.x - it->x) < 16 && abs(bullet.y - it->y) < 16) {
-                    it->health--;
-                    bullet.active = false;
-                    Mix_PlayChannel(-1, explosionSound, 0);
-                }
-            }
-
-            if (it->health <= 0 || it->y > WINDOW_HEIGHT) {
-                if (it->health <= 0) score += 100;
-                it = enemies.erase(it);
-            } else {
-                ++it;
-            }
-        }
+        updateEnemies(enemies, bullets, score, delta);
 
         // Update power-ups
-        for (auto it = powerups.begin(); it != powerups.end();) {
-            it->y += it->speed;
-            if (abs(it->x - player.x) < 32 && abs(it->y - player.y) < 32) {
-                player.shotLevel = 2; // Upgrade to spread shot
-                it->active = false;
-            }
-            if (!it->active || it->y > WINDOW_HEIGHT) {
-                it = powerups.erase(it);
-            } else {
-                ++it;
+        updatePowerUps(powerups, player, delta);
+
+        // Check for player-enemy collisions
+        for (auto& enemy : enemies) {
+            if (AABBCollision(player.x, player.y, player.width, player.height, enemy.x, enemy.y, enemy.width, enemy.height)) {
+                player.health--;
+                enemy.health = 0; // Destroy enemy on collision
             }
         }
 
-        // Render player
-        SDL_Rect playerRect = {(int)player.x, (int)player.y, 32, 32};
-        SDL_RenderCopy(renderer, playerTexture, NULL, &playerRect);
-
-        // Render bullets
-        for (const auto& bullet : bullets) {
-            if (bullet.active) {
-                SDL_Rect rect = {(int)bullet.x, (int)bullet.y, 8, 16};
-                SDL_RenderCopy(renderer, bulletTexture, NULL, &rect);
-            }
+        // Check game over condition
+        if (player.health <= 0) {
+            running = false; // End game if player health reaches zero
         }
 
-        // Render enemies
-        for (const auto& enemy : enemies) {
-            SDL_Rect rect = {(int)enemy.x, (int)enemy.y, 32, 32};
-            SDL_RenderCopy(renderer, enemyTexture, NULL, &rect);
-        }
-
-        // Render power-ups
-        for (const auto& powerup : powerups) {
-            if (powerup.active) {
-                SDL_Rect rect = {(int)powerup.x, (int)powerup.y, 16, 16};
-                SDL_RenderCopy(renderer, powerupTexture, NULL, &rect);
-            }
-        }
-
-        // Render score
-        SDL_Color white = {255, 255, 255};
-        SDL_Surface* scoreSurface = TTF_RenderText_Solid(font, ("Score: " + std::to_string(score)).c_str(), white);
-        SDL_Texture* scoreTexture = SDL_CreateTextureFromSurface(renderer, scoreSurface);
-        SDL_Rect scoreRect = {10, 10, scoreSurface->w, scoreSurface->h};
-        SDL_RenderCopy(renderer, scoreTexture, NULL, &scoreRect);
-        SDL_FreeSurface(scoreSurface);
-        SDL_DestroyTexture(scoreTexture);
+        // Render everything
+        render(renderer, playerTexture, enemyTexture, bulletTexture, powerupTexture, backgroundTexture, player, bullets, enemies, powerups, backgroundY, score, font);
 
         // Present renderer
         SDL_RenderPresent(renderer);
+
+        // Cap frame rate to TARGET_FPS
+        Uint32 frameTime = SDL_GetTicks() - currentTime;
+        if (frameTime < TARGET_DELTA * 1000) {
+            SDL_Delay((Uint32)(TARGET_DELTA * 1000 - frameTime));
+        }
     }
 
     // Cleanup
-    Mix_FreeMusic(bgMusic);
-    Mix_FreeChunk(shootSound);
-    Mix_FreeChunk(explosionSound);
     TTF_CloseFont(font);
     SDL_DestroyTexture(playerTexture);
     SDL_DestroyTexture(enemyTexture);
