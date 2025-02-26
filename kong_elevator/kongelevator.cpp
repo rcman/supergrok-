@@ -1,10 +1,22 @@
 #include <SDL2/SDL.h>
 #include <vector>
 
-// Window dimensions
+// Window and level dimensions
 const int WINDOW_WIDTH = 800;
 const int WINDOW_HEIGHT = 600;
 const int LEVEL_HEIGHT = 2000; // Total height of the game level
+
+// Constants for game entities
+const int PLAYER_SIZE = 50;
+const int ENEMY_SIZE = 50;
+const int GOAL_SIZE = 50;
+
+// Speeds and physics constants (pixels per second)
+const float PLAYER_SPEED = 300.0f;      // Horizontal movement speed
+const float JUMP_VELOCITY = -600.0f;    // Initial upward velocity when jumping
+const float GRAVITY = 1800.0f;          // Gravity acceleration (tuned for snappier feel)
+const float ELEVATOR_SPEED = 120.0f;    // Elevator movement speed
+const float ENEMY_SPEED = 120.0f;       // Enemy movement speed
 
 // Player class
 class Player {
@@ -12,7 +24,7 @@ public:
     float x, y;
     float vx, vy;
     bool onGround;
-    SDL_Rect* onElevator; // Pointer to the elevator the player is on (using rect for simplicity)
+    SDL_Rect* onElevator; // Pointer to the elevator the player is on
 
     Player() : x(0), y(500), vx(0), vy(0), onGround(false), onElevator(nullptr) {}
 };
@@ -34,27 +46,26 @@ public:
 class Elevator {
 public:
     SDL_Rect rect;
-    float speed;
-    int minY, maxY;
+    float minY, maxY;
     bool movingUp;
 
-    Elevator(int x, int y, int w, int h, float s, int min, int max)
-        : speed(s), minY(min), maxY(max), movingUp(false) {
+    Elevator(int x, int y, int w, int h, int min, int max)
+        : minY(static_cast<float>(min)), maxY(static_cast<float>(max)), movingUp(false) {
         rect.x = x;
         rect.y = y;
         rect.w = w;
         rect.h = h;
     }
 
-    void update() {
+    void update(float delta) {
         if (movingUp) {
-            rect.y -= speed;
+            rect.y -= ELEVATOR_SPEED * delta;
             if (rect.y <= minY) {
                 rect.y = minY;
                 movingUp = false;
             }
         } else {
-            rect.y += speed;
+            rect.y += ELEVATOR_SPEED * delta;
             if (rect.y >= maxY) {
                 rect.y = maxY;
                 movingUp = true;
@@ -68,13 +79,13 @@ class Enemy {
 public:
     float x, y;
     float vx;
-    int minX, maxX;
+    float minX, maxX;
 
-    Enemy(float startX, float startY, float speed, int min, int max)
-        : x(startX), y(startY), vx(speed), minX(min), maxX(max) {}
+    Enemy(float startX, float startY, float min, float max)
+        : x(startX), y(startY), vx(ENEMY_SPEED), minX(min), maxX(max) {}
 
-    void update() {
-        x += vx;
+    void update(float delta) {
+        x += vx * delta;
         if (x <= minX || x >= maxX) {
             vx = -vx;
         }
@@ -120,8 +131,9 @@ int main(int argc, char* argv[]) {
     std::vector<Platform> platforms;
     std::vector<Elevator> elevators;
     std::vector<Enemy> enemies;
-    SDL_Rect goal = { 700, 50, 50, 50 };
+    SDL_Rect goal = { 700, 50, GOAL_SIZE, GOAL_SIZE };
     float cameraY = 0;
+    Uint32 lastTime = SDL_GetTicks();
 
     // Initialize platforms
     platforms.push_back(Platform(0, 550, 800, 50));    // Ground
@@ -129,16 +141,21 @@ int main(int argc, char* argv[]) {
     platforms.push_back(Platform(500, 300, 200, 20));  // Upper platform
 
     // Initialize elevators
-    elevators.push_back(Elevator(100, 500, 100, 20, 2, 200, 500));
-    elevators.push_back(Elevator(600, 400, 100, 20, 2, 100, 400));
+    elevators.push_back(Elevator(100, 500, 100, 20, 200, 500));
+    elevators.push_back(Elevator(600, 400, 100, 20, 100, 400));
 
     // Initialize enemies
-    enemies.push_back(Enemy(200, 380, 2, 200, 400));  // On middle platform
-    enemies.push_back(Enemy(500, 280, 2, 500, 700));  // On upper platform
+    enemies.push_back(Enemy(200, 380, 200, 400));  // On middle platform
+    enemies.push_back(Enemy(500, 280, 500, 700));  // On upper platform
 
     // Game loop
     bool running = true;
     while (running) {
+        // Calculate delta time
+        Uint32 currentTime = SDL_GetTicks();
+        float delta = (currentTime - lastTime) / 1000.0f; // Delta time in seconds
+        lastTime = currentTime;
+
         // Event handling
         SDL_Event event;
         while (SDL_PollEvent(&event)) {
@@ -148,16 +165,16 @@ int main(int argc, char* argv[]) {
             if (event.type == SDL_KEYDOWN) {
                 switch (event.key.keysym.sym) {
                     case SDLK_LEFT:
-                        player.vx = -5;
+                        player.vx = -PLAYER_SPEED;
                         break;
                     case SDLK_RIGHT:
-                        player.vx = 5;
+                        player.vx = PLAYER_SPEED;
                         break;
                     case SDLK_SPACE:
                         if (player.onGround || player.onElevator) {
-                            player.vy = -10;
+                            player.vy = JUMP_VELOCITY;
                             player.onGround = false;
-                            player.onElevator = nullptr;
+                            player.onElevator = nullptr; // Detach from elevator
                         }
                         break;
                 }
@@ -171,10 +188,14 @@ int main(int argc, char* argv[]) {
             }
         }
 
-        // Update game state
-        player.x += player.vx;
-        player.y += player.vy;
-        player.vy += 0.5; // Gravity
+        // Update player position
+        player.x += player.vx * delta;
+        player.y += player.vy * delta;
+        player.vy += GRAVITY * delta; // Apply gravity
+
+        // Horizontal bounds
+        if (player.x < 0) player.x = 0;
+        if (player.x > WINDOW_WIDTH - PLAYER_SIZE) player.x = WINDOW_WIDTH - PLAYER_SIZE;
 
         // Ground check
         if (player.y >= 500) {
@@ -184,13 +205,13 @@ int main(int argc, char* argv[]) {
             player.onElevator = nullptr;
         }
 
-        SDL_Rect playerRect = { static_cast<int>(player.x), static_cast<int>(player.y), 50, 50 };
+        SDL_Rect playerRect = { static_cast<int>(player.x), static_cast<int>(player.y), PLAYER_SIZE, PLAYER_SIZE };
 
         // Platform collisions
-        player.onGround = false; // Reset onGround before checking collisions
+        player.onGround = false; // Reset before checking
         for (const auto& platform : platforms) {
             if (isColliding(playerRect, platform.rect) && player.vy > 0) {
-                player.y = platform.rect.y - 50;
+                player.y = platform.rect.y - PLAYER_SIZE;
                 player.vy = 0;
                 player.onGround = true;
             }
@@ -198,10 +219,10 @@ int main(int argc, char* argv[]) {
 
         // Elevator updates and collisions
         for (auto& elevator : elevators) {
-            elevator.update();
+            elevator.update(delta);
             SDL_Rect elevatorRect = elevator.rect;
-            if (isColliding(playerRect, elevatorRect) && player.vy > 0 && player.y + 50 <= elevatorRect.y + 10) {
-                player.y = elevatorRect.y - 50;
+            if (isColliding(playerRect, elevatorRect) && player.vy > 0 && player.y + PLAYER_SIZE <= elevatorRect.y + 10) {
+                player.y = elevatorRect.y - PLAYER_SIZE;
                 player.vy = 0;
                 player.onGround = true;
                 player.onElevator = &elevator.rect;
@@ -210,15 +231,15 @@ int main(int argc, char* argv[]) {
 
         // Ride elevator
         if (player.onElevator) {
-            player.y = player.onElevator->y - 50;
+            player.y = player.onElevator->y - PLAYER_SIZE;
         }
 
         // Enemy updates and collisions
         for (auto& enemy : enemies) {
-            enemy.update();
-            SDL_Rect enemyRect = { static_cast<int>(enemy.x), static_cast<int>(enemy.y), 50, 50 };
+            enemy.update(delta);
+            SDL_Rect enemyRect = { static_cast<int>(enemy.x), static_cast<int>(enemy.y), ENEMY_SIZE, ENEMY_SIZE };
             if (isColliding(playerRect, enemyRect)) {
-                player.x = 0;
+                player.x = 0; // Reset to start
                 player.y = 500;
                 player.vx = 0;
                 player.vy = 0;
@@ -257,18 +278,18 @@ int main(int argc, char* argv[]) {
         // Render enemies (yellow)
         SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255);
         for (const auto& enemy : enemies) {
-            SDL_Rect enemyRect = { static_cast<int>(enemy.x), static_cast<int>(enemy.y - cameraY), 50, 50 };
+            SDL_Rect enemyRect = { static_cast<int>(enemy.x), static_cast<int>(enemy.y - cameraY), ENEMY_SIZE, ENEMY_SIZE };
             SDL_RenderFillRect(renderer, &enemyRect);
         }
 
         // Render player (red)
         SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255);
-        SDL_Rect renderPlayerRect = { static_cast<int>(player.x), static_cast<int>(player.y - cameraY), 50, 50 };
+        SDL_Rect renderPlayerRect = { static_cast<int>(player.x), static_cast<int>(player.y - cameraY), PLAYER_SIZE, PLAYER_SIZE };
         SDL_RenderFillRect(renderer, &renderPlayerRect);
 
         // Render goal (cyan)
         SDL_SetRenderDrawColor(renderer, 0, 255, 255, 255);
-        SDL_Rect renderGoal = { goal.x, goal.y - static_cast<int>(cameraY), goal.w, goal.h };
+        SDL_Rect renderGoal = { goal.x, goal.y - static_cast<int>(cameraY), GOAL_SIZE, GOAL_SIZE };
         SDL_RenderFillRect(renderer, &renderGoal);
 
         SDL_RenderPresent(renderer);
