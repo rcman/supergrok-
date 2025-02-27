@@ -7,13 +7,14 @@
 #include <ctime>
 #include <iostream>
 #include <string>
+#include <cmath>
 
 // Screen dimensions
 const int SCREEN_WIDTH = 1920;
 const int SCREEN_HEIGHT = 1080;
 const int VIRTUAL_WIDTH = 640;
 const int VIRTUAL_HEIGHT = 480;
-const float SCALE_FACTOR = 2.25f;
+const float SCALE_FACTOR = 2.25 rollers = 2.25f;
 const int OFFSET_X = 240;
 
 // Player properties
@@ -35,9 +36,13 @@ const int POWERUP_WIDTH = 16;
 const int POWERUP_HEIGHT = 16;
 
 enum EnemyType {
-    BASIC,
-    FAST,
-    ZIGZAG,
+    STRAIGHT,    // Straight down
+    ZIGZAG,      // Zigzag pattern
+    SINE,        // Sine wave pattern
+    CIRCULAR,    // Circular pattern
+    DIAGONAL,    // Diagonal toward center
+    FAST,        // Fast straight down
+    SPIRAL,      // Spiral pattern
     COUNT
 };
 
@@ -66,12 +71,14 @@ struct Enemy : Entity {
     bool active;
     EnemyType type;
     float speed;
-    float dx; // Horizontal movement for zigzag
+    float dx, dy;      // Movement direction
+    float angle;       // For circular/spiral patterns
+    float amplitude;   // For sine/zigzag patterns
 };
 
 struct PowerUp : Entity {
     bool active;
-    bool isShield; // True for shield, false for weapon power-up
+    bool isShield;
 };
 
 // Load texture helper
@@ -115,9 +122,13 @@ int main(int argc, char* argv[]) {
     SDL_Texture* playerTexture = loadTexture("player.png", renderer);
     SDL_Texture* bulletTexture = loadTexture("bullet.png", renderer);
     SDL_Texture* enemyTextures[EnemyType::COUNT] = {
-        loadTexture("enemy_basic.png", renderer),
-        loadTexture("enemy_fast.png", renderer),
-        loadTexture("enemy_zigzag.png", renderer)
+        loadTexture("enemy1.png", renderer),  // Straight
+        loadTexture("enemy2.png", renderer),  // Zigzag
+        loadTexture("enemy3.png", renderer),  // Sine
+        loadTexture("enemy4.png", renderer),  // Circular
+        loadTexture("enemy5.png", renderer),  // Diagonal
+        loadTexture("enemy6.png", renderer),  // Fast
+        loadTexture("enemy7.png", renderer)   // Spiral
     };
     SDL_Texture* powerUpTexture = loadTexture("powerup.png", renderer);
     SDL_Texture* shieldTexture = loadTexture("shield.png", renderer);
@@ -126,7 +137,6 @@ int main(int argc, char* argv[]) {
     Mix_Chunk* explosionSound = Mix_LoadWAV("explosion.wav");
     TTF_Font* font = TTF_OpenFont("arial.ttf", 24);
 
-    // Initialize player
     Player player = { 
         VIRTUAL_WIDTH / 2.0f - PLAYER_WIDTH / 2.0f, 
         VIRTUAL_HEIGHT - PLAYER_HEIGHT - 20, 
@@ -153,7 +163,6 @@ int main(int argc, char* argv[]) {
         float deltaTime = (currentTime - lastTime) / 1000.0f;
         lastTime = currentTime;
 
-        // Input handling
         while (SDL_PollEvent(&e) != 0) {
             if (e.type == SDL_QUIT) quit = true;
         }
@@ -163,10 +172,8 @@ int main(int argc, char* argv[]) {
         if (keyboardState[SDL_SCANCODE_RIGHT]) player.x += PLAYER_SPEED * deltaTime;
         if (keyboardState[SDL_SCANCODE_UP]) player.y -= PLAYER_SPEED * deltaTime;
         if (keyboardState[SDL_SCANCODE_DOWN]) player.y += PLAYER_SPEED * deltaTime;
-        if (player.x < 0) player.x = 0;
-        if (player.x + PLAYER_WIDTH > VIRTUAL_WIDTH) player.x = VIRTUAL_WIDTH - PLAYER_WIDTH;
-        if (player.y < 0) player.y = 0;
-        if (player.y + PLAYER_HEIGHT > VIRTUAL_HEIGHT) player.y = VIRTUAL_HEIGHT - PLAYER_HEIGHT;
+        player.x = std::max(0.0f, std::min(player.x, VIRTUAL_WIDTH - PLAYER_WIDTH));
+        player.y = std::max(0.0f, std::min(player.y, VIRTUAL_HEIGHT - PLAYER_HEIGHT));
 
         // Shooting
         if (keyboardState[SDL_SCANCODE_SPACE] && player.shootCooldown <= 0) {
@@ -197,20 +204,50 @@ int main(int argc, char* argv[]) {
         enemySpawnTimer--;
         if (enemySpawnTimer <= 0) {
             EnemyType type = static_cast<EnemyType>(rand() % EnemyType::COUNT);
-            float speed;
             float startX = (rand() % 2 == 0) ? -ENEMY_WIDTH : VIRTUAL_WIDTH;
-            float dx = 0;
+            Enemy enemy = { startX, -ENEMY_HEIGHT, ENEMY_WIDTH, ENEMY_HEIGHT, enemyTextures[type], true, type };
             
             switch (type) {
-                case BASIC: speed = 100.0f; break;
-                case FAST: speed = 200.0f; break;
-                case ZIGZAG: 
-                    speed = 150.0f;
-                    dx = (startX < 0) ? 50.0f : -50.0f;
+                case STRAIGHT:
+                    enemy.speed = 100.0f;
+                    enemy.dy = enemy.speed;
+                    break;
+                case ZIGZAG:
+                    enemy.speed = 150.0f;
+                    enemy.dx = (startX < 0) ? 100.0f : -100.0f;
+                    enemy.dy = enemy.speed;
+                    enemy.amplitude = 50.0f;
+                    break;
+                case SINE:
+                    enemy.speed = 120.0f;
+                    enemy.dy = enemy.speed;
+                    enemy.amplitude = 75.0f;
+                    enemy.angle = 0.0f;
+                    break;
+                case CIRCULAR:
+                    enemy.speed = 2.0f; // Angular speed in radians/sec
+                    enemy.angle = 0.0f;
+                    enemy.amplitude = 100.0f; // Radius
+                    enemy.x = VIRTUAL_WIDTH / 2.0f;
+                    enemy.y = VIRTUAL_HEIGHT / 2.0f;
+                    break;
+                case DIAGONAL:
+                    enemy.speed = 130.0f;
+                    enemy.dx = (startX < 0) ? enemy.speed * 0.5f : -enemy.speed * 0.5f;
+                    enemy.dy = enemy.speed;
+                    break;
+                case FAST:
+                    enemy.speed = 200.0f;
+                    enemy.dy = enemy.speed;
+                    break;
+                case SPIRAL:
+                    enemy.speed = 1.5f; // Angular speed
+                    enemy.angle = 0.0f;
+                    enemy.amplitude = 150.0f; // Starting radius
+                    enemy.x = VIRTUAL_WIDTH / 2.0f;
+                    enemy.y = VIRTUAL_HEIGHT / 2.0f;
                     break;
             }
-            
-            Enemy enemy = { startX, -ENEMY_HEIGHT, ENEMY_WIDTH, ENEMY_HEIGHT, enemyTextures[type], true, type, speed, dx };
             enemies.push_back(enemy);
             enemySpawnTimer = 30 + (rand() % 20);
         }
@@ -220,20 +257,42 @@ int main(int argc, char* argv[]) {
             if (!enemy.active) continue;
             
             switch (enemy.type) {
-                case BASIC:
+                case STRAIGHT:
                 case FAST:
-                    enemy.y += enemy.speed * deltaTime;
-                    if (enemy.x < VIRTUAL_WIDTH / 2) enemy.x += enemy.speed * deltaTime * 0.5f;
-                    else enemy.x -= enemy.speed * deltaTime * 0.5f;
+                    enemy.y += enemy.dy * deltaTime;
                     break;
                 case ZIGZAG:
-                    enemy.y += enemy.speed * deltaTime;
                     enemy.x += enemy.dx * deltaTime;
+                    enemy.y += enemy.dy * deltaTime;
                     if (enemy.x <= 0 || enemy.x + ENEMY_WIDTH >= VIRTUAL_WIDTH) enemy.dx = -enemy.dx;
+                    break;
+                case SINE:
+                    enemy.angle += enemy.speed * deltaTime * 0.05f;
+                    enemy.x = startX + enemy.amplitude * sin(enemy.angle);
+                    enemy.y += enemy.dy * deltaTime;
+                    break;
+                case CIRCULAR:
+                    enemy.angle += enemy.speed * deltaTime;
+                    enemy.x = VIRTUAL_WIDTH / 2.0f + enemy.amplitude * cos(enemy.angle);
+                    enemy.y = VIRTUAL_HEIGHT / 2.0f + enemy.amplitude * sin(enemy.angle);
+                    break;
+                case DIAGONAL:
+                    enemy.x += enemy.dx * deltaTime;
+                    enemy.y unreliable
+                    enemy.y += enemy.dy * deltaTime;
+                    break;
+                case SPIRAL:
+                    enemy.angle += enemy.speed * deltaTime;
+                    enemy.amplitude -= enemy.speed * deltaTime * 10; // Shrink radius over time
+                    enemy.x = VIRTUAL_WIDTH / 2.0f + enemy.amplitude * cos(enemy.angle);
+                    enemy.y = VIRTUAL_HEIGHT / 2.0f + enemy.amplitude * sin(enemy.angle);
                     break;
             }
             
-            if (enemy.y > VIRTUAL_HEIGHT) enemy.active = false;
+            if (enemy.y > VIRTUAL_HEIGHT || enemy.x < -ENEMY_WIDTH || enemy.x > VIRTUAL_WIDTH || 
+                (enemy.type == SPIRAL && enemy.amplitude <= 10)) {
+                enemy.active = false;
+            }
 
             if (!player.shieldActive) {
                 SDL_Rect playerRect = { static_cast<int>(player.x), static_cast<int>(player.y), PLAYER_WIDTH, PLAYER_HEIGHT };
@@ -359,42 +418,36 @@ int main(int argc, char* argv[]) {
         // Render HUD
         SDL_Color white = {255, 255, 255};
         
-        // Score
         std::string scoreText = "Score: " + std::to_string(score);
         SDL_Surface* scoreSurface = TTF_RenderText_Solid(font, scoreText.c_str(), white);
         SDL_Texture* scoreTexture = SDL_CreateTextureFromSurface(renderer, scoreSurface);
-        SDL_Rect scoreDst = { OFFSET_X + 10, 10, scoreSurface->w, scoreSurface->h };
+        SDL screenplay = { OFFSET_X + 10, 10, scoreSurface->w, scoreSurface->h };
         SDL_RenderCopy(renderer, scoreTexture, NULL, &scoreDst);
 
-        // Lives
         std::string livesText = "Lives: " + std::to_string(player.lives);
         SDL_Surface* livesSurface = TTF_RenderText_Solid(font, livesText.c_str(), white);
         SDL_Texture* livesTexture = SDL_CreateTextureFromSurface(renderer, livesSurface);
         SDL_Rect livesDst = { OFFSET_X + 10, 40, livesSurface->w, livesSurface->h };
         SDL_RenderCopy(renderer, livesTexture, NULL, &livesDst);
 
-        // Level
         std::string levelText = "Level: " + std::to_string(player.level);
         SDL_Surface* levelSurface = TTF_RenderText_Solid(font, levelText.c_str(), white);
         SDL_Texture* levelTexture = SDL_CreateTextureFromSurface(renderer, levelSurface);
         SDL_Rect levelDst = { OFFSET_X + 10, 70, levelSurface->w, levelSurface->h };
         SDL_RenderCopy(renderer, levelTexture, NULL, &levelDst);
 
-        // Hi-Score
         std::string hiScoreText = "Hi-Score: " + std::to_string(player.hiScore);
         SDL_Surface* hiScoreSurface = TTF_RenderText_Solid(font, hiScoreText.c_str(), white);
         SDL_Texture* hiScoreTexture = SDL_CreateTextureFromSurface(renderer, hiScoreSurface);
         SDL_Rect hiScoreDst = { OFFSET_X + 10, 100, hiScoreSurface->w, hiScoreSurface->h };
         SDL_RenderCopy(renderer, hiScoreTexture, NULL, &hiScoreDst);
 
-        // Health bar
         SDL_Rect healthBar = { OFFSET_X + 10, 130, static_cast<int>(200 * SCALE_FACTOR * (player.health / 100.0f)), 20 };
         SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255);
         SDL_RenderFillRect(renderer, &healthBar);
         SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
         SDL_RenderRect(renderer, &healthBar);
 
-        // Shield timer
         if (player.shieldActive) {
             int shieldTimeLeft = 60 - ((currentTime - player.shieldTimer) / 1000);
             std::string shieldText = "Shield: " + std::to_string(shieldTimeLeft);
@@ -406,7 +459,6 @@ int main(int argc, char* argv[]) {
             SDL_DestroyTexture(shieldTexture);
         }
 
-        // Cleanup HUD textures
         SDL_FreeSurface(scoreSurface);
         SDL_DestroyTexture(scoreTexture);
         SDL_FreeSurface(livesSurface);
