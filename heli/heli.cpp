@@ -13,11 +13,13 @@ constexpr int SCREEN_HEIGHT = 1080;
 constexpr int MAP_WIDTH = 19200;  // in tiles
 constexpr int MAP_HEIGHT = 10800; // in tiles
 constexpr int HELI_SIZE = 64;
+constexpr int BULLET_SIZE = 16;
 constexpr float PLAYER_SPEED = 300.0f;
+constexpr float BULLET_SPEED = 600.0f;
 constexpr Uint32 TARGET_FPS = 60;
 constexpr Uint32 FRAME_DELAY = 1000 / TARGET_FPS;
+constexpr float SHOOT_COOLDOWN = 0.2f; // seconds between shots
 
-// RAII wrappers for SDL resources
 struct SDLWindowDeleter { void operator()(SDL_Window* ptr) { if (ptr) SDL_DestroyWindow(ptr); } };
 struct SDLRendererDeleter { void operator()(SDL_Renderer* ptr) { if (ptr) SDL_DestroyRenderer(ptr); } };
 struct SDLTextureDeleter { void operator()(SDL_Texture* ptr) { if (ptr) SDL_DestroyTexture(ptr); } };
@@ -31,12 +33,25 @@ struct Vector2 {
     bool operator!=(const Vector2& other) const { return x != other.x || y != other.y; }
 };
 
+struct Bullet {
+    Vector2 position;
+    Vector2 direction;
+    bool isPlayerBullet; // To distinguish between player and enemy bullets
+    
+    Bullet(float x, float y, Vector2 dir, bool playerBullet) 
+        : position{x, y}, direction{dir}, isPlayerBullet{playerBullet} {}
+};
+
 class Helicopter {
 public:
     Vector2 position;
     float speed = PLAYER_SPEED;
+    float shootTimer = 0.0f;
     
     Helicopter(float x, float y) : position{x, y} {}
+    
+    bool canShoot() const { return shootTimer <= 0.0f; }
+    void resetShootTimer() { shootTimer = SHOOT_COOLDOWN; }
 };
 
 class Game {
@@ -47,10 +62,13 @@ private:
     Helicopter player{MAP_WIDTH * TILE_SIZE / 2.0f, MAP_HEIGHT * TILE_SIZE / 2.0f};
     Vector2 camera{0, 0};
     std::vector<Helicopter> enemies;
+    std::vector<Bullet> bullets;
     
     UniqueTexture playerTexture;
     UniqueTexture enemyTexture;
     UniqueTexture tileTexture;
+    UniqueTexture playerBulletTexture;
+    UniqueTexture enemyBulletTexture;
 
     SDL_Texture* loadTexture(const char* path) {
         SDL_Surface* surface = IMG_Load(path);
@@ -88,6 +106,8 @@ public:
         playerTexture = UniqueTexture(loadTexture("player_heli.png"));
         enemyTexture = UniqueTexture(loadTexture("enemy_heli.png"));
         tileTexture = UniqueTexture(loadTexture("ground_tile.png"));
+        playerBulletTexture = UniqueTexture(loadTexture("player_bullet.png"));
+        enemyBulletTexture = UniqueTexture(loadTexture("enemy_bullet.png"));
 
         running = true;
         enemies.emplace_back(1000, 1000);
@@ -105,10 +125,61 @@ public:
         if (keys[SDL_SCANCODE_S]) player.position.y += speed * deltaTime;
         if (keys[SDL_SCANCODE_A]) player.position.x -= speed * deltaTime;
         if (keys[SDL_SCANCODE_D]) player.position.x += speed * deltaTime;
+        
+        // Player shooting (spacebar)
+        if (keys[SDL_SCANCODE_SPACE] && player.canShoot()) {
+            Vector2 direction{0, -1}; // Shoot upward for simplicity
+            bullets.emplace_back(player.position.x + HELI_SIZE/2 - BULLET_SIZE/2,
+                                player.position.y - BULLET_SIZE,
+                                direction, true);
+            player.resetShootTimer();
+        }
 
         // Keep player within map bounds
         player.position.x = std::max(0.0f, std::min(player.position.x, MAP_WIDTH * TILE_SIZE - HELI_SIZE));
         player.position.y = std::max(0.0f, std::min(player.position.y, MAP_HEIGHT * TILE_SIZE - HELI_SIZE));
+    }
+
+    void update(float deltaTime) {
+        // Update player shoot timer
+        player.shootTimer -= deltaTime;
+        if (player.shootTimer < 0.0f) player.shootTimer = 0.0f;
+
+        // Update enemies (simple shooting toward player)
+        for (auto& enemy : enemies) {
+            enemy.shootTimer -= deltaTime;
+            if (enemy.shootTimer < 0.0f) enemy.shootTimer = 0.0f;
+            
+            if (enemy.canShoot()) {
+                Vector2 direction{
+                    player.position.x - enemy.position.x,
+                    player.position.y - enemy.position.y
+                };
+                float length = std::sqrt(direction.x * direction.x + direction.y * direction.y);
+                if (length > 0) {
+                    direction.x /= length;
+                    direction.y /= length;
+                    bullets.emplace_back(enemy.position.x + HELI_SIZE/2 - BULLET_SIZE/2,
+                                        enemy.position.y + HELI_SIZE/2 - BULLET_SIZE/2,
+                                        direction, false);
+                    enemy.resetShootTimer();
+                }
+            }
+        }
+
+        // Update bullets
+        for (size_t i = 0; i < bullets.size();) {
+            bullets[i].position.x += bullets[i].direction.x * BULLET_SPEED * deltaTime;
+            bullets[i].position.y += bullets[i].direction.y * BULLET_SPEED * deltaTime;
+            
+            // Remove bullets that go off-screen
+            if (bullets[i].position.x < 0 || bullets[i].position.x > MAP_WIDTH * TILE_SIZE ||
+                bullets[i].position.y < 0 || bullets[i].position.y > MAP_HEIGHT * TILE_SIZE) {
+                bullets.erase(bullets.begin() + i);
+            } else {
+                ++i;
+            }
+        }
     }
 
     void updateCamera() {
@@ -126,7 +197,6 @@ public:
     void render() {
         SDL_RenderClear(renderer.get());
 
-        // Pre-calculate visible tile range
         const int tilesX = VIEWPORT_WIDTH / TILE_SIZE + 2;
         const int tilesY = VIEWPORT_HEIGHT / TILE_SIZE + 2;
         const int startX = static_cast<int>(camera.x) / TILE_SIZE;
@@ -164,6 +234,18 @@ public:
             SDL_RenderCopy(renderer.get(), enemyTexture.get(), nullptr, &enemyRect);
         }
 
+        // Render bullets
+        for (const auto& bullet : bullets) {
+            SDL_Rect bulletRect{
+                static_cast<int>(bullet.position.x - camera.x + (SCREEN_WIDTH - VIEWPORT_WIDTH) / 2),
+                static_cast<int>(bullet.position.y - camera.y + (SCREEN_HEIGHT - VIEWPORT_HEIGHT) / 2),
+                BULLET_SIZE, BULLET_SIZE
+            };
+            SDL_RenderCopy(renderer.get(), 
+                         bullet.isPlayerBullet ? playerBulletTexture.get() : enemyBulletTexture.get(),
+                         nullptr, &bulletRect);
+        }
+
         SDL_RenderPresent(renderer.get());
     }
 
@@ -175,6 +257,7 @@ public:
             lastTime = currentTime;
 
             handleInput(deltaTime);
+            update(deltaTime);
             updateCamera();
             render();
 
@@ -186,7 +269,6 @@ public:
     }
 
     ~Game() {
-        // Smart pointers handle cleanup automatically
         IMG_Quit();
         SDL_Quit();
     }
