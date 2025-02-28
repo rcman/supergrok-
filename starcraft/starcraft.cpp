@@ -19,7 +19,7 @@ const int SCREEN_HEIGHT = 600;
 const int TILE_SIZE = 32;
 const int MAP_WIDTH = 20;
 const int MAP_HEIGHT = 15;
-const int GRID_CELL_SIZE = 4; // Initial spatial grid cell size
+const int GRID_CELL_SIZE = 4;
 
 // Enums
 enum TerrainType { GRASS, DIRT };
@@ -38,7 +38,16 @@ struct RenderComponent { SDL_Texture* texture; };
 struct HealthComponent { int health; };
 struct MovementComponent { std::vector<Point> path; size_t pathIndex = 0; };
 struct WorkerComponent { bool isCarrying = false; int minerals = 0; size_t targetResource = 0; size_t base = 0; };
-struct AttackComponent { int damage, range; };
+struct AttackComponent { 
+    int damage, range; 
+    void attack(ECS& ecs, EntityID target) {
+        if (ecs.healths.count(target) && abs(ecs.positions[id].x - ecs.positions[target].x) + 
+            abs(ecs.positions[id].y - ecs.positions[target].y) <= range) {
+            ecs.healths[target].health -= damage;
+        }
+    }
+    EntityID id; // Added to store owning entity ID
+};
 struct BuildingComponent { std::vector<ComponentType> produceableUnits; std::map<ComponentType, std::vector<ComponentType>> techRequirements; };
 
 using EntityID = size_t;
@@ -82,6 +91,18 @@ public:
         factions.erase(id);
         entities.erase(std::remove(entities.begin(), entities.end(), id), entities.end());
     }
+
+    ~ECS() {
+        entities.clear();
+        positions.clear();
+        renders.clear();
+        healths.clear();
+        movements.clear();
+        workers.clear();
+        attacks.clear();
+        buildings.clear();
+        factions.clear();
+    }
 };
 
 // Entity Configuration for Scalability
@@ -102,8 +123,8 @@ public:
     int cellSize;
 
     SpatialGrid(int mapWidth, int mapHeight) {
-        cellSize = std::max(GRID_CELL_SIZE, std::max(mapWidth, mapHeight) / 10); // Dynamic resizing
-        grid.resize(mapHeight / cellSize, std::vector<std::vector<EntityID>>(mapWidth / cellSize));
+        cellSize = std::max(GRID_CELL_SIZE, std::max(mapWidth, mapHeight) / 10);
+        grid.resize((mapHeight + cellSize - 1) / cellSize, std::vector<std::vector<EntityID>>((mapWidth + cellSize - 1) / cellSize));
     }
 
     void update(const ECS& ecs) {
@@ -112,8 +133,7 @@ public:
             if (ecs.positions.count(id)) {
                 int gx = ecs.positions.at(id).x / cellSize;
                 int gy = ecs.positions.at(id).y / cellSize;
-                if (gx >= 0 && gx < grid[0].size() && gy >= 0 && gy < grid.size()) {
-                    // Quadtree-like: Sort within cell by position for finer collision checks
+                if (gx >= 0 && gx < static_cast<int>(grid[0].size()) && gy >= 0 && gy < static_cast<int>(grid.size())) {
                     grid[gy][gx].push_back(id);
                     std::sort(grid[gy][gx].begin(), grid[gy][gx].end(), [&](EntityID a, EntityID b) {
                         return ecs.positions[a].x + ecs.positions[a].y * MAP_WIDTH < 
@@ -127,7 +147,7 @@ public:
     std::vector<EntityID> getEntitiesAt(int x, int y) {
         int gx = x / cellSize;
         int gy = y / cellSize;
-        if (gx >= 0 && gx < grid[0].size() && gy >= 0 && gy < grid.size())
+        if (gx >= 0 && gx < static_cast<int>(grid[0].size()) && gy >= 0 && gy < static_cast<int>(grid.size()))
             return grid[gy][gx];
         return {};
     }
@@ -182,6 +202,7 @@ std::vector<Point> findPath(int startX, int startY, int endX, int endY,
 
     Point current = goal;
     while (!(current == start)) {
+        if (cameFrom.find(current) == cameFrom.end()) break; // Path not found
         path.push_back(current);
         current = cameFrom[current];
     }
@@ -214,11 +235,9 @@ public:
             if (ecs.attacks.count(id) && rand() % 100 < 5) {
                 for (auto target : ecs.entities) {
                     if (ecs.factions[id] != ecs.factions[target] && ecs.attacks.count(target)) {
-                        ecs.attacks[id].damage = ecs.factions[id] == PROTOSS ? 8 : 6; // Protoss bonus
-                        if (abs(ecs.positions[id].x - ecs.positions[target].x) + 
-                            abs(ecs.positions[id].y - ecs.positions[target].y) <= ecs.attacks[id].range) {
-                            ecs.healths[target].health -= ecs.attacks[id].damage;
-                        }
+                        ecs.attacks[id].damage = ecs.factions[id] == PROTOSS ? 8 : 6;
+                        ecs.attacks[id].id = id; // Set owning ID
+                        ecs.attacks[id].attack(ecs, target);
                     }
                 }
             }
@@ -229,29 +248,31 @@ public:
 // Network
 class Network {
 public:
-    TCPsocket server, client;
-    SDLNet_SocketSet set;
+    TCPsocket server = nullptr, client = nullptr;
+    SDLNet_SocketSet set = nullptr;
     bool isServer = false;
     std::queue<Command> commandQueue;
 
     Network() {
-        SDLNet_Init();
+        if (SDLNet_Init() < 0) std::cerr << "SDLNet_Init failed: " << SDLNet_GetError() << std::endl;
         set = SDLNet_AllocSocketSet(2);
     }
 
     void initServer() {
         IPaddress ip;
-        SDLNet_ResolveHost(&ip, nullptr, 12345);
-        server = SDLNet_TCP_Open(&ip);
-        SDLNet_TCP_AddSocket(set, server);
-        isServer = true;
+        if (SDLNet_ResolveHost(&ip, nullptr, 12345) == 0) {
+            server = SDLNet_TCP_Open(&ip);
+            if (server) SDLNet_TCP_AddSocket(set, server);
+            isServer = true;
+        }
     }
 
     void initClient(const char* host) {
         IPaddress ip;
-        SDLNet_ResolveHost(&ip, host, 12345);
-        client = SDLNet_TCP_Open(&ip);
-        SDLNet_TCP_AddSocket(set, client);
+        if (SDLNet_ResolveHost(&ip, host, 12345) == 0) {
+            client = SDLNet_TCP_Open(&ip);
+            if (client) SDLNet_TCP_AddSocket(set, client);
+        }
     }
 
     void sendCommand(const Command& cmd) {
@@ -280,26 +301,27 @@ public:
                      SDL_Texture* protossGatewayTex) {
         char buffer[2048];
         TCPsocket sock = isServer ? server : client;
-        if (SDLNet_CheckSockets(set, 0) > 0 && SDLNet_SocketReady(sock)) {
-            int received = SDLNet_TCP_Recv(sock, buffer, 2048);
+        if (sock && SDLNet_CheckSockets(set, 0) > 0 && SDLNet_SocketReady(sock)) {
+            int received = SDLNet_TCP_Recv(sock, buffer, sizeof(buffer) - 1);
             if (received > 0) {
+                buffer[received] = '\0'; // Ensure null termination
                 if (strncmp(buffer, "STATE", 5) == 0) {
                     int entityCount;
-                    sscanf(buffer + 6, "%d", &entityCount);
+                    if (sscanf(buffer + 6, "%d", &entityCount) != 1) return;
                     char* token = strtok(buffer + 8, ";");
                     std::map<EntityID, bool> updated;
                     while (token) {
                         EntityID id;
                         int x, y, fac;
                         char type;
-                        sscanf(token, "%zu,%d,%d,%d,%c", &id, &x, &y, &fac, &type);
+                        if (sscanf(token, "%zu,%d,%d,%d,%c", &id, &x, &y, &fac, &type) != 5) break;
                         Faction faction = static_cast<Faction>(fac);
                         if (!ecs.positions.count(id)) {
                             ecs.createEntity();
                             ecs.entities.back() = id;
                             if (type == 'W') {
                                 ecs.workers[id] = WorkerComponent{};
-                                ecs.attacks[id] = {faction == PROTOSS ? 8 : 6, 1};
+                                ecs.attacks[id] = {faction == PROTOSS ? 8 : 6, 1, id};
                                 ecs.renders[id] = {faction == TERRAN ? terranUnitTex : faction == ZERG ? zergUnitTex : protossUnitTex};
                             } else if (type == 'B') {
                                 ecs.buildings[id] = BuildingComponent{};
@@ -309,6 +331,7 @@ public:
                                 ecs.renders[id] = {resTex};
                             }
                             ecs.healths[id] = {type == 'B' ? 200 : type == 'R' ? 100 : 40};
+                            ecs.movements[id] = {};
                         }
                         ecs.positions[id] = {x, y, static_cast<float>(x), static_cast<float>(y), SDL_GetTicks()};
                         ecs.factions[id] = faction;
@@ -321,8 +344,9 @@ public:
                     }
                 } else if (strncmp(buffer, "CMD", 3) == 0) {
                     Command cmd;
-                    sscanf(buffer + 4, "%u %s %zu %d %d", &cmd.timestamp, buffer + 20, &cmd.id, &cmd.x, &cmd.y);
-                    cmd.type = std::string(buffer + 20, strchr(buffer + 20, ' ') - (buffer + 20));
+                    char typeBuf[16];
+                    if (sscanf(buffer + 4, "%u %15s %zu %d %d", &cmd.timestamp, typeBuf, &cmd.id, &cmd.x, &cmd.y) != 5) return;
+                    cmd.type = typeBuf;
                     commandQueue.push(cmd);
                 }
             }
@@ -339,7 +363,7 @@ public:
     ~Network() {
         if (server) SDLNet_TCP_Close(server);
         if (client) SDLNet_TCP_Close(client);
-        SDLNet_FreeSocketSet(set);
+        if (set) SDLNet_FreeSocketSet(set);
         SDLNet_Quit();
     }
 };
@@ -347,22 +371,22 @@ public:
 // Audio
 class Audio {
 public:
-    Mix_Music* music;
-    Mix_Chunk* effect;
+    Mix_Music* music = nullptr;
+    Mix_Chunk* effect = nullptr;
 
     Audio() {
-        Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048);
+        if (Mix_OpenAudio(44100, MIX_DEFAULT_FORMAT, 2, 2048) < 0) return;
         music = Mix_LoadMUS("background.mp3");
         effect = Mix_LoadWAV("effect.wav");
         if (!music || !effect) std::cerr << "Audio load failed: " << Mix_GetError() << std::endl;
-        Mix_PlayMusic(music, -1);
+        if (music) Mix_PlayMusic(music, -1);
     }
 
     void playEffect() { if (effect) Mix_PlayChannel(-1, effect, 0); }
 
     ~Audio() {
-        Mix_FreeMusic(music);
-        Mix_FreeChunk(effect);
+        if (music) Mix_FreeMusic(music);
+        if (effect) Mix_FreeChunk(effect);
         Mix_CloseAudio();
     }
 };
@@ -370,18 +394,23 @@ public:
 // Game class
 class Game {
 public:
-    SDL_Window* window;
-    SDL_Renderer* renderer;
-    TTF_Font* font;
+    SDL_Window* window = nullptr;
+    SDL_Renderer* renderer = nullptr;
+    TTF_Font* font = nullptr;
     int map[MAP_HEIGHT][MAP_WIDTH];
     ECS ecs;
     std::vector<EntityID> selectedUnits;
-    SDL_Texture* terrainTextures[2];
-    SDL_Texture* terranUnitTexture, *zergUnitTexture, *protossUnitTexture;
-    SDL_Texture* resourceTexture;
-    SDL_Texture* terranCCTexture, *terranBarracksTexture;
-    SDL_Texture* zergHatcheryTexture, *zergSpawningPoolTexture;
-    SDL_Texture* protossNexusTexture, *protossGatewayTexture;
+    SDL_Texture* terrainTextures[2] = {nullptr, nullptr};
+    SDL_Texture* terranUnitTexture = nullptr;
+    SDL_Texture* zergUnitTexture = nullptr;
+    SDL_Texture* protossUnitTexture = nullptr;
+    SDL_Texture* resourceTexture = nullptr;
+    SDL_Texture* terranCCTexture = nullptr;
+    SDL_Texture* terranBarracksTexture = nullptr;
+    SDL_Texture* zergHatcheryTexture = nullptr;
+    SDL_Texture* zergSpawningPoolTexture = nullptr;
+    SDL_Texture* protossNexusTexture = nullptr;
+    SDL_Texture* protossGatewayTexture = nullptr;
     int minerals = 50;
     AIController ai;
     Network network;
@@ -390,7 +419,7 @@ public:
     bool isServer = true;
 
     Game() : spatialGrid(MAP_WIDTH, MAP_HEIGHT) {
-        srand(time(nullptr));
+        srand(static_cast<unsigned>(time(nullptr)));
         for (int y = 0; y < MAP_HEIGHT; y++) {
             for (int x = 0; x < MAP_WIDTH; x++) {
                 map[y][x] = rand() % 2;
@@ -408,35 +437,59 @@ public:
     }
 
     void setupEntities(const std::vector<EntityConfig>& configs) {
+        EntityID terranBase = 0, zergBase = 0;
         for (const auto& config : configs) {
             EntityID id = ecs.createEntity();
             ecs.positions[id] = {config.x, config.y, static_cast<float>(config.x), static_cast<float>(config.y), SDL_GetTicks()};
             ecs.healths[id] = {config.health};
             ecs.factions[id] = config.faction;
-            ecs.renders[id] = {nullptr};
+            ecs.renders[id] = {nullptr}; // Set in init()
             if (config.isWorker) {
-                ecs.workers[id] = WorkerComponent{.base = 0}; // Base set later
-                ecs.attacks[id] = {config.faction == PROTOSS ? 8 : 6, 1};
+                ecs.workers[id] = WorkerComponent{};
+                ecs.attacks[id] = {config.faction == PROTOSS ? 8 : 6, 1, id};
                 ecs.movements[id] = {};
+                if (config.faction == ZERG) ai.aiUnits.push_back(id);
             } else if (config.isBuilding) {
                 ecs.buildings[id] = BuildingComponent{.produceableUnits = config.produceableUnits};
+                if (config.faction == TERRAN && config.x == 5) terranBase = id;
+                if (config.faction == ZERG && config.x == 15) zergBase = id;
             }
-            if (config.faction == TERRAN && config.x == 5) {
-                for (auto& worker : ecs.workers) worker.second.base = id; // Set base for Terran workers
-            } else if (config.faction == ZERG && config.x == 15) {
-                for (auto& worker : ecs.workers) {
-                    if (ecs.factions[worker.first] == ZERG) worker.second.base = id; // Set base for Zerg workers
-                    ai.aiUnits.push_back(worker.first);
-                }
-            }
+        }
+        for (auto& worker : ecs.workers) {
+            worker.second.base = (ecs.factions[worker.first] == TERRAN ? terranBase : zergBase);
         }
     }
 
     bool init() {
-        if (SDL_Init(SDL_INIT_EVERYTHING) < 0 || IMG_Init(IMG_INIT_PNG) == 0 || TTF_Init() < 0 || Mix_Init(MIX_INIT_MP3) == 0) return false;
+        auto cleanupOnFailure = [this]() {
+            if (window) SDL_DestroyWindow(window);
+            if (renderer) SDL_DestroyRenderer(renderer);
+            if (font) TTF_CloseFont(font);
+            for (int i = 0; i < 2; i++) if (terrainTextures[i]) SDL_DestroyTexture(terrainTextures[i]);
+            if (terranUnitTexture) SDL_DestroyTexture(terranUnitTexture);
+            if (zergUnitTexture) SDL_DestroyTexture(zergUnitTexture);
+            if (protossUnitTexture) SDL_DestroyTexture(protossUnitTexture);
+            if (resourceTexture) SDL_DestroyTexture(resourceTexture);
+            if (terranCCTexture) SDL_DestroyTexture(terranCCTexture);
+            if (terranBarracksTexture) SDL_DestroyTexture(terranBarracksTexture);
+            if (zergHatcheryTexture) SDL_DestroyTexture(zergHatcheryTexture);
+            if (zergSpawningPoolTexture) SDL_DestroyTexture(zergSpawningPoolTexture);
+            if (protossNexusTexture) SDL_DestroyTexture(protossNexusTexture);
+            if (protossGatewayTexture) SDL_DestroyTexture(protossGatewayTexture);
+            TTF_Quit();
+            IMG_Quit();
+            Mix_Quit();
+            SDL_Quit();
+        };
+
+        if (SDL_Init(SDL_INIT_EVERYTHING) < 0 || IMG_Init(IMG_INIT_PNG) == 0 || TTF_Init() < 0 || Mix_Init(MIX_INIT_MP3) == 0) {
+            cleanupOnFailure();
+            return false;
+        }
         window = SDL_CreateWindow("Starcraft-like", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, SCREEN_WIDTH, SCREEN_HEIGHT, 0);
+        if (!window) { cleanupOnFailure(); return false; }
         renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
-        if (!window || !renderer) return false;
+        if (!renderer) { cleanupOnFailure(); return false; }
 
         font = TTF_OpenFont("font.ttf", 24);
         terrainTextures[GRASS] = IMG_LoadTexture(renderer, "terrain0.png");
@@ -457,6 +510,7 @@ public:
             !terranBarracksTexture || !zergHatcheryTexture || !zergSpawningPoolTexture || 
             !protossNexusTexture || !protossGatewayTexture) {
             std::cerr << "Asset load failed: " << IMG_GetError() << std::endl;
+            cleanupOnFailure();
             return false;
         }
 
@@ -492,7 +546,8 @@ public:
             for (auto id : selectedUnits) {
                 if (ecs.workers.count(id)) {
                     for (auto res : ecs.entities) {
-                        if (!ecs.workers.count(res) && !ecs.buildings.count(res) && ecs.positions[res].x == mx && ecs.positions[res].y == my) {
+                        if (!ecs.workers.count(res) && !ecs.buildings.count(res) && 
+                            ecs.positions[res].x == mx && ecs.positions[res].y == my) {
                             Command cmd{SDL_GetTicks(), "MOVE", id, mx, my};
                             network.sendCommand(cmd);
                             network.commandQueue.push(cmd);
@@ -501,7 +556,7 @@ public:
                     }
                 }
             }
-        } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_p) {
+        } else if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_p && minerals >= 50) {
             for (auto id : ecs.entities) {
                 if (ecs.buildings.count(id) && !ecs.buildings[id].produceableUnits.empty()) {
                     EntityID newUnit = ecs.createEntity();
@@ -510,7 +565,7 @@ public:
                     ecs.healths[newUnit] = {40};
                     ecs.factions[newUnit] = TERRAN;
                     ecs.renders[newUnit] = {terranUnitTexture};
-                    ecs.attacks[newUnit] = {6, 1};
+                    ecs.attacks[newUnit] = {6, 1, newUnit};
                     ecs.movements[newUnit] = {};
                     minerals -= 50;
                     Command cmd{SDL_GetTicks(), "PRODUCE", newUnit, ecs.positions[id].x + 1, ecs.positions[id].y};
@@ -536,7 +591,8 @@ public:
             if (cmd.type == "MOVE" && ecs.workers.count(cmd.id)) {
                 ecs.workers[cmd.id].targetResource = 0;
                 for (auto res : ecs.entities) {
-                    if (!ecs.workers.count(res) && !ecs.buildings.count(res) && ecs.positions[res].x == cmd.x && ecs.positions[res].y == cmd.y) {
+                    if (!ecs.workers.count(res) && !ecs.buildings.count(res) && 
+                        ecs.positions[res].x == cmd.x && ecs.positions[res].y == cmd.y) {
                         ecs.workers[cmd.id].targetResource = res;
                         break;
                     }
@@ -550,7 +606,7 @@ public:
                 ecs.healths[cmd.id] = {40};
                 ecs.factions[cmd.id] = TERRAN;
                 ecs.renders[cmd.id] = {terranUnitTexture};
-                ecs.attacks[cmd.id] = {6, 1};
+                ecs.attacks[cmd.id] = {6, 1, cmd.id};
                 ecs.movements[cmd.id] = {};
             }
         }
@@ -558,7 +614,7 @@ public:
         Uint32 now = SDL_GetTicks();
         for (auto id : ecs.entities) {
             if (ecs.movements.count(id) && !ecs.movements[id].path.empty() && ecs.movements[id].pathIndex < ecs.movements[id].path.size()) {
-                float t = (now - ecs.positions[id].lastUpdate) / 100.0f; // Interpolation factor
+                float t = static_cast<float>(now - ecs.positions[id].lastUpdate) / 100.0f;
                 int nextX = ecs.movements[id].path[ecs.movements[id].pathIndex].x;
                 int nextY = ecs.movements[id].path[ecs.movements[id].pathIndex].y;
                 ecs.positions[id].interpX = ecs.positions[id].x + (nextX - ecs.positions[id].x) * t;
@@ -566,8 +622,8 @@ public:
                 if (t >= 1.0f) {
                     ecs.positions[id].x = nextX;
                     ecs.positions[id].y = nextY;
-                    ecs.positions[id].interpX = nextX;
-                    ecs.positions[id].interpY = nextY;
+                    ecs.positions[id].interpX = static_cast<float>(nextX);
+                    ecs.positions[id].interpY = static_cast<float>(nextY);
                     ecs.positions[id].lastUpdate = now;
                     ecs.movements[id].pathIndex++;
                     if (ecs.movements[id].pathIndex >= ecs.movements[id].path.size()) ecs.movements[id].path.clear();
@@ -576,14 +632,16 @@ public:
             if (ecs.workers.count(id)) {
                 if (ecs.workers[id].targetResource && !ecs.workers[id].isCarrying) {
                     EntityID res = ecs.workers[id].targetResource;
-                    if (ecs.positions[id].x == ecs.positions[res].x && ecs.positions[id].y == ecs.positions[res].y && ecs.healths[res].health > 0) {
+                    if (ecs.positions.count(res) && ecs.positions[id].x == ecs.positions[res].x && 
+                        ecs.positions[id].y == ecs.positions[res].y && ecs.healths[res].health > 0) {
                         ecs.healths[res].health -= 8;
                         ecs.workers[id].minerals += 8;
                         ecs.workers[id].isCarrying = true;
                     }
                 } else if (ecs.workers[id].isCarrying) {
                     EntityID base = ecs.workers[id].base;
-                    if (ecs.positions[id].x == ecs.positions[base].x && ecs.positions[id].y == ecs.positions[base].y) {
+                    if (ecs.positions.count(base) && ecs.positions[id].x == ecs.positions[base].x && 
+                        ecs.positions[id].y == ecs.positions[base].y) {
                         minerals += ecs.workers[id].minerals;
                         ecs.workers[id].minerals = 0;
                         ecs.workers[id].isCarrying = false;
@@ -616,7 +674,7 @@ public:
         }
 
         for (auto id : ecs.entities) {
-            if (ecs.renders.count(id)) {
+            if (ecs.renders.count(id) && ecs.renders[id].texture) {
                 SDL_Rect dest = {static_cast<int>(ecs.positions[id].interpX * TILE_SIZE), 
                                  static_cast<int>(ecs.positions[id].interpY * TILE_SIZE), TILE_SIZE, TILE_SIZE};
                 SDL_RenderCopy(renderer, ecs.renders[id].texture, NULL, &dest);
@@ -626,30 +684,34 @@ public:
         SDL_Color color = {255, 255, 255, 255};
         std::string mineralText = "Minerals: " + std::to_string(minerals);
         SDL_Surface* surface = TTF_RenderText_Solid(font, mineralText.c_str(), color);
-        SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
-        SDL_Rect dest = {10, 10, surface->w, surface->h};
-        SDL_RenderCopy(renderer, texture, NULL, &dest);
-        SDL_FreeSurface(surface);
-        SDL_DestroyTexture(texture);
+        if (surface) {
+            SDL_Texture* texture = SDL_CreateTextureFromSurface(renderer, surface);
+            if (texture) {
+                SDL_Rect dest = {10, 10, surface->w, surface->h};
+                SDL_RenderCopy(renderer, texture, NULL, &dest);
+                SDL_DestroyTexture(texture);
+            }
+            SDL_FreeSurface(surface);
+        }
 
         SDL_RenderPresent(renderer);
     }
 
     void clean() {
-        for (int i = 0; i < 2; i++) SDL_DestroyTexture(terrainTextures[i]);
-        SDL_DestroyTexture(terranUnitTexture);
-        SDL_DestroyTexture(zergUnitTexture);
-        SDL_DestroyTexture(protossUnitTexture);
-        SDL_DestroyTexture(resourceTexture);
-        SDL_DestroyTexture(terranCCTexture);
-        SDL_DestroyTexture(terranBarracksTexture);
-        SDL_DestroyTexture(zergHatcheryTexture);
-        SDL_DestroyTexture(zergSpawningPoolTexture);
-        SDL_DestroyTexture(protossNexusTexture);
-        SDL_DestroyTexture(protossGatewayTexture);
-        TTF_CloseFont(font);
-        SDL_DestroyRenderer(renderer);
-        SDL_DestroyWindow(window);
+        for (int i = 0; i < 2; i++) if (terrainTextures[i]) SDL_DestroyTexture(terrainTextures[i]);
+        if (terranUnitTexture) SDL_DestroyTexture(terranUnitTexture);
+        if (zergUnitTexture) SDL_DestroyTexture(zergUnitTexture);
+        if (protossUnitTexture) SDL_DestroyTexture(protossUnitTexture);
+        if (resourceTexture) SDL_DestroyTexture(resourceTexture);
+        if (terranCCTexture) SDL_DestroyTexture(terranCCTexture);
+        if (terranBarracksTexture) SDL_DestroyTexture(terranBarracksTexture);
+        if (zergHatcheryTexture) SDL_DestroyTexture(zergHatcheryTexture);
+        if (zergSpawningPoolTexture) SDL_DestroyTexture(zergSpawningPoolTexture);
+        if (protossNexusTexture) SDL_DestroyTexture(protossNexusTexture);
+        if (protossGatewayTexture) SDL_DestroyTexture(protossGatewayTexture);
+        if (font) TTF_CloseFont(font);
+        if (renderer) SDL_DestroyRenderer(renderer);
+        if (window) SDL_DestroyWindow(window);
         TTF_Quit();
         IMG_Quit();
         Mix_Quit();
@@ -660,7 +722,8 @@ public:
 int main() {
     Game game;
     if (!game.init()) {
-        SDL_Log("Initialization failed: %s", SDL_GetError());
+        std::cerr << "Initialization failed: " << SDL_GetError() << std::endl;
+        game.clean();
         return 1;
     }
 
