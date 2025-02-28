@@ -10,4 +10,6 @@ Super Rapid Fire <br>
 Amiga 1200 Assembly<br>
 Rick Dangerous<br>
 Raspberry Pi 5 Assembly graphics code
+Load Runner Re-make
+StarCarft Remake
 
