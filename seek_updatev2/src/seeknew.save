@@ -1,0 +1,118 @@
+#include <SDL2/SDL.h>
+#include <math.h>
+
+#define SCREEN_WIDTH 800
+#define SCREEN_HEIGHT 600
+#define PLAYER_SPEED 4
+#define BULLET_SPEED 10
+#define MAX_BULLETS 100
+
+typedef struct {
+    float x, y;
+    float angle;
+    int active;
+} Bullet;
+
+typedef struct {
+    float x, y;
+    float angle;
+    float speed;
+} Player;
+
+int main(int argc, char* argv[]) {
+    SDL_Init(SDL_INIT_VIDEO);
+    SDL_Window* window = SDL_CreateWindow("Safari Shooter", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, SCREEN_WIDTH, SCREEN_HEIGHT, 0);
+    SDL_Renderer* renderer = SDL_CreateRenderer(window, -1, SDL_RENDERER_ACCELERATED);
+
+    Player player = {SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2, 0, PLAYER_SPEED};
+    Bullet bullets[MAX_BULLETS] = {0};
+    int bulletCount = 0;
+
+    // Background texture (simplified as a solid color for this example)
+    SDL_Surface* bgSurface = SDL_CreateRGBSurface(0, SCREEN_WIDTH, SCREEN_HEIGHT, 32, 0, 0, 0, 0);
+    SDL_FillRect(bgSurface, NULL, SDL_MapRGB(bgSurface->format, 50, 100, 50)); // Greenish background
+    SDL_Texture* bgTexture = SDL_CreateTextureFromSurface(renderer, bgSurface);
+    SDL_FreeSurface(bgSurface);
+
+    float bgAngle = 0; // Background rotation angle
+    int running = 1;
+    SDL_Event event;
+
+    while (running) {
+        // Handle input
+        while (SDL_PollEvent(&event)) {
+            if (event.type == SDL_QUIT) running = 0;
+            if (event.type == SDL_KEYDOWN && event.key.keysym.sym == SDLK_SPACE && bulletCount < MAX_BULLETS) {
+                bullets[bulletCount].x = player.x;
+                bullets[bulletCount].y = player.y;
+                bullets[bulletCount].angle = player.angle;
+                bullets[bulletCount].active = 1;
+                bulletCount++;
+            }
+        }
+
+        const Uint8* keys = SDL_GetKeyboardState(NULL);
+        if (keys[SDL_SCANCODE_W]) player.y -= player.speed;
+        if (keys[SDL_SCANCODE_S]) player.y += player.speed;
+        if (keys[SDL_SCANCODE_A]) player.x -= player.speed;
+        if (keys[SDL_SCANCODE_D]) player.x += player.speed;
+        if (keys[SDL_SCANCODE_LEFT]) player.angle -= 5;
+        if (keys[SDL_SCANCODE_RIGHT]) player.angle += 5;
+
+        // Keep player in bounds
+        if (player.x < 0) player.x = 0;
+        if (player.x > SCREEN_WIDTH) player.x = SCREEN_WIDTH;
+        if (player.y < 0) player.y = 0;
+        if (player.y > SCREEN_HEIGHT) player.y = SCREEN_HEIGHT;
+
+        // Update bullets
+        for (int i = 0; i < bulletCount; i++) {
+            if (bullets[i].active) {
+                bullets[i].x += BULLET_SPEED * cos(bullets[i].angle * M_PI / 180);
+                bullets[i].y += BULLET_SPEED * sin(bullets[i].angle * M_PI / 180);
+                if (bullets[i].x < 0 || bullets[i].x > SCREEN_WIDTH || bullets[i].y < 0 || bullets[i].y > SCREEN_HEIGHT) {
+                    bullets[i].active = 0;
+                }
+            }
+        }
+
+        // Rotate background
+        bgAngle += 1;
+        if (bgAngle >= 360) bgAngle -= 360;
+
+        // Render
+        SDL_RenderClear(renderer);
+
+        // Draw rotating background
+        SDL_Rect bgRect = {0, 0, SCREEN_WIDTH, SCREEN_HEIGHT};
+        SDL_RenderCopyEx(renderer, bgTexture, NULL, &bgRect, bgAngle, NULL, SDL_FLIP_NONE);
+
+        // Draw player (simple triangle)
+        SDL_SetRenderDrawColor(renderer, 255, 0, 0, 255);
+        SDL_Point playerPoints[4] = {
+            {(int)(player.x + 20 * cos(player.angle * M_PI / 180)), (int)(player.y + 20 * sin(player.angle * M_PI / 180))},
+            {(int)(player.x + 10 * cos((player.angle + 135) * M_PI / 180)), (int)(player.y + 10 * sin((player.angle + 135) * M_PI / 180))},
+            {(int)(player.x + 10 * cos((player.angle - 135) * M_PI / 180)), (int)(player.y + 10 * sin((player.angle - 135) * M_PI / 180))},
+            {(int)(player.x + 20 * cos(player.angle * M_PI / 180)), (int)(player.y + 20 * sin(player.angle * M_PI / 180))}
+        };
+        SDL_RenderDrawLines(renderer, playerPoints, 4);
+
+        // Draw bullets
+        SDL_SetRenderDrawColor(renderer, 255, 255, 0, 255);
+        for (int i = 0; i < bulletCount; i++) {
+            if (bullets[i].active) {
+                SDL_Rect bulletRect = {(int)bullets[i].x - 2, (int)bullets[i].y - 2, 4, 4};
+                SDL_RenderFillRect(renderer, &bulletRect);
+            }
+        }
+
+        SDL_RenderPresent(renderer);
+        SDL_Delay(16); // ~60 FPS
+    }
+
+    SDL_DestroyTexture(bgTexture);
+    SDL_DestroyRenderer(renderer);
+    SDL_DestroyWindow(window);
+    SDL_Quit();
+    return 0;
+}
